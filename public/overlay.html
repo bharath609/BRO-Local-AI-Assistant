@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#09120f">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self';">
+    <title>BRO voice</title>
+    <link rel="stylesheet" href="/overlay.css">
+  </head>
+  <body>
+    <main class="voice-widget">
+      <header class="widget-header">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">B</div>
+          <div class="brand-copy"><strong>BRO</strong><span>voice assistant</span></div>
+        </div>
+        <div class="header-actions">
+          <span class="connection-dot" id="connection-dot" title="BRO backend status" aria-label="BRO backend status"></span>
+          <button class="close-button" type="button" id="close-popup" aria-label="Close BRO voice popup" title="Close">×</button>
+        </div>
+      </header>
+
+      <section class="voice-center" aria-labelledby="voice-title">
+        <button class="mic-button" type="button" id="start-listening" aria-label="Listen for one command" title="Press once to listen for one command">
+          <span class="mic-glyph" aria-hidden="true"></span>
+        </button>
+        <div class="voice-copy">
+          <h1 id="voice-title">Talk to BRO</h1>
+          <span class="mic-state" id="mic-state">MIC OFF</span>
+        </div>
+        <button class="stop-button" type="button" id="stop-listening" disabled>Stop</button>
+      </section>
+
+      <p class="voice-status" id="voice-status" role="status">Press Ctrl + Alt + B once to listen</p>
+      <p class="transcript" id="transcript" aria-live="polite">&nbsp;</p>
+      <p class="reply" id="reply" aria-live="polite">&nbsp;</p>
+      <footer class="widget-footer">Say “BRO” or tap Ctrl + Alt + B · say “sleep” to stop listening</footer>
+    </main>
+    <script src="/recorder.js" defer></script>
+    <script src="/overlay.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1210">
+    <title>BRO · Local AI assistant</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true">B</div>
+          <div>
+            <div class="brand-name">BRO</div>
+            <div class="brand-caption">local copilot</div>
+          </div>
+        </div>
+
+        <div class="connection-card" id="connection-card">
+          <span class="status-dot" id="connection-dot" aria-hidden="true"></span>
+          <div>
+            <strong id="connection-label">Connecting</strong>
+            <span id="connection-detail">Checking local server</span>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="Sections">
+          <button class="nav-item active" type="button" data-view="chat" aria-current="page">
+            <span class="nav-icon" aria-hidden="true">⌁</span><span>Chat</span><span class="nav-count" id="chat-count">0</span>
+          </button>
+          <button class="nav-item" type="button" data-view="workspace">
+            <span class="nav-icon" aria-hidden="true">▦</span><span>Workspace</span>
+          </button>
+          <button class="nav-item" type="button" data-view="settings">
+            <span class="nav-icon" aria-hidden="true">⚙</span><span>Provider</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="local-note"><span class="lock-icon" aria-hidden="true">⌑</span><span>Runs on your machine</span></div>
+          <div class="sidebar-version">BRO / local mode</div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="mobile-brand"><span class="brand-mark small" aria-hidden="true">B</span><strong>BRO</strong></div>
+          <div class="topbar-copy">
+            <p class="eyebrow" id="view-eyebrow">PERSONAL ASSISTANT</p>
+            <h1 id="view-title">Good to see you, Bharath.</h1>
+          </div>
+          <div class="topbar-actions">
+            <button class="icon-button speaker-toggle" type="button" id="speaker-toggle" aria-pressed="false" aria-label="Turn read aloud on" title="Read assistant replies aloud">
+              <span aria-hidden="true">◖</span><span class="speaker-label">Read aloud</span>
+            </button>
+            <button class="icon-button mobile-menu" type="button" id="mobile-menu" aria-label="Open navigation">☰</button>
+          </div>
+        </header>
+
+        <div class="server-alert" id="server-alert" role="alert" hidden>
+          <span class="alert-symbol" aria-hidden="true">!</span>
+          <div><strong>Local server unavailable.</strong><span id="server-alert-text">Start BRO's backend, then retry.</span></div>
+          <button class="text-button" type="button" id="retry-bootstrap">Retry</button>
+        </div>
+
+        <section class="view active" id="chat-view" data-view-panel="chat" aria-labelledby="view-title">
+          <div class="chat-layout">
+            <div class="chat-scroll" id="chat-scroll">
+              <div class="welcome" id="welcome-state">
+                <div class="welcome-orb" aria-hidden="true"><span>✦</span></div>
+                <p class="eyebrow">YOUR PRIVATE WORKBENCH</p>
+                <h2 id="welcome-heading">What are we building today, Bharath?</h2>
+                <p class="welcome-copy">Hey Bharath, I’m your local assistant. Ask me to open a site, manage a registered project, run an approved command, or talk through your next move. Your local work stays on your machine.</p>
+                <div class="suggestion-grid" aria-label="Suggested prompts">
+                  <button type="button" class="suggestion-chip" data-suggestion="What can you do?"><span>✦</span> What can you do?</button>
+                  <button type="button" class="suggestion-chip" data-suggestion="Show my projects"><span>▦</span> Show my projects</button>
+                  <button type="button" class="suggestion-chip" data-suggestion="Open https://github.com"><span>↗</span> Open GitHub</button>
+                  <button type="button" class="suggestion-chip" data-suggestion="Status"><span>⌁</span> Check provider status</button>
+                </div>
+              </div>
+              <div class="messages" id="messages" aria-live="polite" aria-relevant="additions"></div>
+              <div class="typing-indicator" id="typing-indicator" hidden aria-label="BRO is thinking">
+                <div class="avatar assistant-avatar" aria-hidden="true">B</div><div class="typing-bubble"><span></span><span></span><span></span><em>Thinking</em></div>
+              </div>
+              <div class="action-feed" id="action-feed" aria-live="polite"></div>
+            </div>
+
+            <div class="composer-wrap">
+              <form class="composer" id="chat-form">
+                <label class="sr-only" for="message-input">Message BRO</label>
+                <textarea id="message-input" rows="1" placeholder="Message BRO…" autocomplete="off" spellcheck="true"></textarea>
+                <div class="composer-tools">
+                  <button class="round-button mic-button" type="button" id="mic-button" aria-label="Use voice input" title="Voice input"><span aria-hidden="true">♩</span></button>
+                  <span class="composer-hint">Enter to send · Shift + Enter for a new line</span>
+                  <button class="send-button" type="submit" id="send-button"><span>Send</span><span aria-hidden="true">↗</span></button>
+                </div>
+              </form>
+              <p class="composer-footnote"><span class="tiny-lock" aria-hidden="true">⌑</span> Your conversations stay local to this app.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" id="workspace-view" data-view-panel="workspace" aria-labelledby="workspace-title" hidden>
+          <div class="page-heading"><div><p class="eyebrow">YOUR WORKSPACE</p><h2 id="workspace-title">Projects</h2><p>Connect the folders you want BRO to understand and work in.</p></div><button class="primary-button" type="button" id="show-project-form">＋ Add project</button></div>
+          <div class="workspace-grid">
+            <div class="panel project-form-panel" id="project-form-panel" hidden>
+              <div class="panel-heading"><div><h3>Add a project</h3><p>Register a local folder and its everyday commands.</p></div><button class="close-button" type="button" id="hide-project-form" aria-label="Close add project form">×</button></div>
+              <form id="project-form" class="stack-form">
+                <div class="form-grid two-col">
+                  <div class="field"><label for="project-name">Name</label><input id="project-name" name="name" required placeholder="My app"></div>
+                  <div class="field"><label for="project-root">Root folder</label><input id="project-root" name="root" required placeholder="C:\\Projects\\my-app"></div>
+                </div>
+                <div class="command-fields"><p class="field-label">Commands <span>optional</span></p><div class="form-grid two-col">
+                  <div class="field"><label for="command-dev">Dev</label><input id="command-dev" name="dev" placeholder="npm run dev"></div>
+                  <div class="field"><label for="command-test">Test</label><input id="command-test" name="test" placeholder="npm test"></div>
+                  <div class="field"><label for="command-build">Build</label><input id="command-build" name="build" placeholder="npm run build"></div>
+                  <div class="field"><label for="command-lint">Lint</label><input id="command-lint" name="lint" placeholder="npm run lint"></div>
+                </div></div>
+                <div class="form-actions"><button class="secondary-button" type="button" id="cancel-project">Cancel</button><button class="primary-button" type="submit">Add project</button></div>
+                <p class="form-message" id="project-form-message" role="status"></p>
+              </form>
+            </div>
+            <div class="projects-panel"><div class="section-line"><h3>Registered projects</h3><span class="muted" id="project-count">0 projects</span></div><div class="project-list" id="project-list"></div></div>
+          </div>
+        </section>
+
+        <section class="view" id="settings-view" data-view-panel="settings" aria-labelledby="settings-title" hidden>
+          <div class="page-heading"><div><p class="eyebrow">LOCAL CONFIGURATION</p><h2 id="settings-title">Provider settings</h2><p>Choose the model endpoint BRO uses for chat.</p></div></div>
+           <div class="settings-layout"><div class="panel settings-panel"><div class="panel-heading"><div><h3>AI provider</h3><p>Use a local Ollama model or an OpenAI-compatible model endpoint.</p></div><span class="settings-badge">LOCAL</span></div>
+             <form id="settings-form" class="stack-form"><div class="field"><label for="base-url">Base URL</label><input id="base-url" name="baseUrl" type="url" placeholder="http://localhost:11434/v1"><span class="field-help">Use <strong>https://api.openai.com/v1</strong> for OpenAI, or a local/remote compatible endpoint.</span></div><div class="field"><label for="model">Model</label><input id="model" name="model" placeholder="gpt-6.1-sol"></div><div class="field"><label for="protocol">API protocol</label><select id="protocol" name="protocol"><option value="auto">Auto-detect</option><option value="responses">OpenAI Responses API</option><option value="chat">Chat Completions-compatible</option></select><span class="field-help">Auto uses Responses for api.openai.com and Chat Completions for Ollama and other compatible servers.</span></div><div class="field"><label for="api-key">API key <span class="optional">optional for local endpoints</span></label><input id="api-key" name="apiKey" type="password" autocomplete="new-password" placeholder="Paste the provider key here"><span class="field-help">Keys are stored locally and never displayed back after saving.</span></div><div class="form-actions"><button class="secondary-button" type="button" id="openai-gpt-preset">Use OpenAI GPT-6.1 Sol preset</button><button class="primary-button" type="submit">Save settings</button></div><p class="form-message" id="settings-message" role="status"></p></form>
+            </div><div class="settings-aside"><div class="privacy-card"><div class="privacy-icon" aria-hidden="true">⌑</div><h3>Your key stays yours</h3><p>BRO sends provider credentials only to your configured local backend. This interface never reads them back or renders them in the page.</p></div><div class="tip-card"><span class="tip-label">GPT-6.1 SETUP</span><p>The preset fills <strong>https://api.openai.com/v1</strong>, model <strong>gpt-6.1-sol</strong>, and the Responses API. You must supply your own authorized API key; do not paste it into chat.</p></div><div class="tip-card"><span class="tip-label">LOCAL MODEL</span><p>For Ollama, use <strong>http://127.0.0.1:11434/v1</strong> and a model installed on this computer, such as <strong>llama3.2:3b</strong>. A local Ollama endpoint does not require an API key.</p></div></div></div>
+        </section>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/recorder.js" defer></script>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

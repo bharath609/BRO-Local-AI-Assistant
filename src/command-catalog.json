@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "title": "Local PC AI Assistant — Resource Command Catalog",
+  "purpose": "A safe command template for mapping natural-language or voice commands to local handlers. This file does not grant PC access by itself.",
+  "safety_policy": {
+    "default_confirmation": "never",
+    "sensitive_data_confirmation": "always",
+    "destructive_confirmation": "always"
+  },
+  "command_patterns": [
+    {"pattern":"open {resource}","intent":"resource.open","example":"open YouTube"},
+    {"pattern":"go to {website}","intent":"resource.open","example":"go to GitHub"},
+    {"pattern":"search {query}","intent":"web.search","example":"search local LLM tutorials"},
+    {"pattern":"search {site} for {query}","intent":"web.search_site","example":"search YouTube for Python basics"},
+    {"pattern":"open {app}","intent":"app.open","example":"open Notepad"},
+    {"pattern":"open {folder}","intent":"folder.open","example":"open Downloads"}
+  ],
+  "resources": [
+    {"id":"youtube","phrases":["open youtube","go to youtube"],"intent":"resource.open","action_type":"open_url","target":"https://www.youtube.com","confirmation":"never"},
+    {"id":"linkedin","phrases":["open linkedin","go to linkedin"],"intent":"resource.open","action_type":"open_url","target":"https://www.linkedin.com","confirmation":"never"},
+    {"id":"google","phrases":["open google","go to google"],"intent":"resource.open","action_type":"open_url","target":"https://www.google.com","confirmation":"never"},
+    {"id":"gmail","phrases":["open gmail","check my gmail"],"intent":"resource.open","action_type":"open_url","target":"https://mail.google.com","confirmation":"never","sensitive":true},
+    {"id":"github","phrases":["open github","go to github"],"intent":"resource.open","action_type":"open_url","target":"https://github.com","confirmation":"never"},
+    {"id":"chatgpt","phrases":["open chatgpt","go to chatgpt"],"intent":"resource.open","action_type":"open_url","target":"https://chatgpt.com","confirmation":"never"},
+    {"id":"google_drive","phrases":["open google drive","open drive"],"intent":"resource.open","action_type":"open_url","target":"https://drive.google.com","confirmation":"never","sensitive":true},
+    {"id":"google_calendar","phrases":["open google calendar","open calendar"],"intent":"resource.open","action_type":"open_url","target":"https://calendar.google.com","confirmation":"never","sensitive":true},
+    {"id":"google_maps","phrases":["open google maps","open maps"],"intent":"resource.open","action_type":"open_url","target":"https://maps.google.com","confirmation":"never"},
+    {"id":"stackoverflow","phrases":["open stack overflow","open stackoverflow"],"intent":"resource.open","action_type":"open_url","target":"https://stackoverflow.com","confirmation":"never"},
+    {"id":"wikipedia","phrases":["open wikipedia","go to wikipedia"],"intent":"resource.open","action_type":"open_url","target":"https://www.wikipedia.org","confirmation":"never"},
+    {"id":"reddit","phrases":["open reddit","go to reddit"],"intent":"resource.open","action_type":"open_url","target":"https://www.reddit.com","confirmation":"never"},
+    {"id":"netflix","phrases":["open netflix","go to netflix"],"intent":"resource.open","action_type":"open_url","target":"https://www.netflix.com","confirmation":"never"},
+    {"id":"spotify_web","phrases":["open spotify","open spotify web"],"intent":"resource.open","action_type":"open_url","target":"https://open.spotify.com","confirmation":"never"},
+    {"id":"x","phrases":["open x","open twitter"],"intent":"resource.open","action_type":"open_url","target":"https://x.com","confirmation":"never"},
+    {"id":"whatsapp_web","phrases":["open whatsapp","open whatsapp web"],"intent":"resource.open","action_type":"open_url","target":"https://web.whatsapp.com","confirmation":"never","sensitive":true},
+    {"id":"amazon","phrases":["open amazon","go to amazon"],"intent":"resource.open","action_type":"open_url","target":"https://www.amazon.com","confirmation":"never"},
+    {"id":"microsoft_word","phrases":["open word","open microsoft word"],"intent":"app.open","action_type":"open_app","handler_key":"word","confirmation":"never"},
+    {"id":"microsoft_excel","phrases":["open excel","open microsoft excel"],"intent":"app.open","action_type":"open_app","handler_key":"excel","confirmation":"never"},
+    {"id":"microsoft_powerpoint","phrases":["open powerpoint","open microsoft powerpoint"],"intent":"app.open","action_type":"open_app","handler_key":"powerpoint","confirmation":"never"},
+    {"id":"notepad","phrases":["open notepad"],"intent":"app.open","action_type":"open_app","handler_key":"notepad","confirmation":"never"},
+    {"id":"calculator","phrases":["open calculator","open calc"],"intent":"app.open","action_type":"open_app","handler_key":"calculator","confirmation":"never"},
+    {"id":"file_explorer","phrases":["open file explorer","open explorer"],"intent":"app.open","action_type":"open_app","handler_key":"file_explorer","confirmation":"never"},
+    {"id":"settings","phrases":["open settings","open windows settings"],"intent":"app.open","action_type":"open_settings","handler_key":"settings","confirmation":"never"},
+    {"id":"downloads","phrases":["open downloads","show downloads folder"],"intent":"folder.open","action_type":"open_known_folder","handler_key":"downloads","confirmation":"never"},
+    {"id":"documents","phrases":["open documents","show documents folder"],"intent":"folder.open","action_type":"open_known_folder","handler_key":"documents","confirmation":"never"},
+    {"id":"desktop","phrases":["open desktop folder","show desktop"],"intent":"folder.open","action_type":"open_known_folder","handler_key":"desktop","confirmation":"never"},
+    {"id":"pictures","phrases":["open pictures","show pictures folder"],"intent":"folder.open","action_type":"open_known_folder","handler_key":"pictures","confirmation":"never"},
+    {"id":"search_web","phrases":["search for {query}","google {query}"],"intent":"web.search","action_type":"search_web","template":"https://www.google.com/search?q={url_encoded_query}","confirmation":"never"},
+    {"id":"search_youtube","phrases":["search youtube for {query}","find {query} on youtube"],"intent":"web.search_site","action_type":"search_web","template":"https://www.youtube.com/results?search_query={url_encoded_query}","confirmation":"never"}
+  ]
+}
