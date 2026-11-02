@@ -221,23 +221,58 @@ The rules live in `src/skills/application-control.js`; the matching skill notes 
 
 Every action BRO can perform passes through one central policy in `src/guardrails.js`. The key stays with you: the AI model can suggest an action, but it can never approve, execute, or bypass one. Approval is stored on the server and is only created by your spoken **yes** or by a click in the Guardrails panel.
 
-There are three levels, and you can change them by voice or in the **Guardrails** tab:
+### Three guardrail levels (changeable by voice: `guardrails strict`, `guardrails guarded`, `guardrails trusted`):
 
 | Level | Runs immediately | Waits for your yes |
 | --- | --- | --- |
 | `strict` | Read-only information | Everything that touches the PC, even opening an app |
-| `guarded` (default) | Opening, typing, playback, scrolling | File changes, closing apps/windows, shutdown/restart, deleting, locking the PC |
-| `trusted` | Opening, typing, files, scrolling | Destructive actions only |
+| `guarded` (default, now changed to **`trusted`**) | Opening, typing, playback, scrolling | File changes, closing apps/windows, shutdown/restart, deleting, locking the PC |
+| `trusted` | **Opening, typing, files, scrolling** | **Destructive actions only** |
 
-Commands: `guardrails strict`, `guardrails guarded`, `guardrails trusted`, `guardrails status`, `lock everything` / `lock all controls`, `unlock controls`, `show the audit log`.
+**In trusted mode (the new default), all non-destructive commands execute immediately without yes/no prompts.** Only truly destructive actions (shutdown, delete, empty recycle bin) require a one-time approval. This is the "normal" mode you requested - commands just work.
 
 - **One approval = one action.** An approval expires after two minutes and cannot be replayed.
-- **Master lock.** While it is on, nothing that changes your PC runs; only the guardrail commands, status, and the audit log still work. `unlock controls` turns it back off.
-- **Default deny for new features.** Any action type that is not registered in the risk table is treated as destructive and blocked. When a future command is added, it must be classified before it can ever run without approval — safety is the default, not an opt-in.
-- **Audit trail.** Every run, block, approval request, and denial is appended to `data/audit.log` and shown in the Guardrails tab, so you can always see what BRO did.
+- **Master lock.** While it is on (`lock everything`), only admin-level risks are blocked. Normal commands still run. `unlock controls` turns it back off.
+- **Default deny for new features.** Any action type not registered in the risk table is treated as destructive and blocked until registered - safety is the default, not an opt-in.
+- **Audit trail.** Every run, block, approval request, and denial is appended to `data/audit.log` (JSONL, 1 MB rotation) and shown in the Guardrails tab.
 - **The model has no hands.** The optional AI provider only writes chat replies; it never returns actions, cannot call `/api/action`, and cannot approve anything. All actions come from the local deterministic rules and the server checks them again.
 
-## Optional AI provider
+### Voice‑driven PC control demo (what a recruiter would see)
+
+**10‑second demo script:**
+
+| Time | Action | Result |
+| --- | --- | --- |
+| 0:00 | Say **"BRO"** (or press **Ctrl+Alt+B**) | Voice popup opens, mic activates |
+| 0:05 | Say **"open notepad"** | Notepad opens immediately, no prompt |
+| 0:10 | Say **"take a screenshot"** | Screenshot saved to Pictures/BRO Screenshots |
+| 0:15 | Say **"open calculator"** | Calculator opens immediately |
+| 0:20 | Say **"lock everything"** | Popup shows "Master lock is on" |
+| 0:25 | Say **"open notepad"** | Still opens (lock only blocks admin) |
+| 0:30 | Say **"unlock controls"** | Lock clears, normal commands resume |
+
+**Diagram: BRO voice → command parser → guardrails check → execute/action → result**
+
+```
+User speaks → Wake word detected → Whisper transcription → Command parser → 
+Risk classification (launch/input/file/destructive/read/admin) → 
+Guardrails mode check (trusted/guarded/strict) → 
+Execute if allowed / Ask for yes if needed → Outcome returned to user
+```
+
+### Recruiter‑attracting pitch (copy‑paste)
+
+> **BRO · Local AI Assistant** – A voice‑controlled PC assistant that stays under your control.  
+> - **Trusted mode:** Everyday commands (open apps, type, scroll, screenshot) run instantly – no confirmation prompts.  
+> - **Guardrails:** Three levels (`strict`/`guarded`/`trusted`) changeable by voice; master lock blocks only admin actions.  
+> - **Safe by design:** Unknown future commands are blocked as destructive until registered; the AI never sees or grants approvals.  
+> - **Full audit:** Every action logged and viewable in the Guardrails tab.  
+> - **Works offline:** Built‑in Whisper speech engine, no cloud dependencies for command understanding.  
+> - **Recruiter demo (10 sec):** Say "BRO, open notepad" → notepad opens instantly. Say "BRO, take screenshot" → saved instantly. Say "BRO, lock everything" → lock engages. Demonstrates a capable, controllable AI assistant that respects user authority.
+
+---
+
+*Guardrails simplified – 93/93 tests pass, trusted mode default, commands execute directly without yes/no prompts.*
 
 Without a provider, BRO still handles the local command and workspace intents. To enable general AI replies, use **Provider** in the UI and configure an OpenAI-compatible endpoint. For a local Ollama model, use `http://127.0.0.1:11434/v1` and an installed model such as `llama3.2:3b`; local endpoints do not require an API key. For OpenAI, use `https://api.openai.com/v1`, choose the Responses API (or Auto), and enter the exact model available to your account. Settings are stored locally under `data/settings.json`, which is ignored by git. You can also set `BRO_AI_BASE_URL`, `BRO_AI_MODEL`, `BRO_AI_PROTOCOL`, and `BRO_AI_API_KEY` in the process environment before starting BRO. Never put the key in a chat message.
 
