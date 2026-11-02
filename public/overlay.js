@@ -5,22 +5,30 @@
 
   const $ = (selector) => document.querySelector(selector);
   const CONTEXT_STORAGE_KEY = 'bro-overlay-context-v1';
-  const CAPTURE_OPTIONS = { silenceMs: 900, noSpeechMs: 6000, maxMs: 15000 };
+  const CAPTURE_OPTIONS = { silenceMs: 1100, noSpeechMs: 6000, maxMs: 15000 };
   const WATCH_OPTIONS = { silenceMs: 550, noSpeechMs: 3500, maxMs: 3500 };
   const WAKE_COOLDOWN_MS = 900;
   // 20 s by default; BRO_AUTO_HIDE_MS tunes it for testing or personal taste.
   const AUTO_HIDE_MS = (window.broDesktop && Number(window.broDesktop.autoHideMs)) || 20000;
+  // After every command BRO stays awake this long, treating the next thing you
+  // say as a command without needing the wake word again.
+  const FOLLOW_UP_MS = (window.broDesktop && Number(window.broDesktop.followUpMs)) || 20000;
+  // Commands that put BRO to sleep: the popup disappears, but the microphone
+  // keeps watching for “BRO” so saying it (or pressing Ctrl + Alt + B) brings
+  // the popup straight back.
+  const SLEEP_COMMAND = /^(?:stop\s+listening|sleep(?:\s+(?:mode|now|bro))?|go\s+to\s+sleep(?:\s+(?:mode|now))?|go\s+quiet|go\s+away|disappear|hide(?:\s+yourself)?|goodbye|bye(?:\s+bro)?|that(?:'?s|\s+is)\s+all)[.!]?$/i;
   let hideTimer = null;
 
   // phase: idle -> awake -> listening -> transcribing -> working -> idle
   //   idle    microphone closed, waiting for the hotkey
   //   awake   microphone open, listening only for the “BRO” wake word
-  const state = { phase: 'idle', mic: null, micStarting: null, engine: null, context: {}, debug: false, wake: true, lastWakeCheckAt: 0, lastWatchClipAt: 0 };
+  const state = { phase: 'idle', mic: null, micStarting: null, engine: null, context: {}, debug: false, wake: true, lastWakeCheckAt: 0, lastWatchClipAt: 0, followUp: false, followUpDeadline: 0, followUpToken: 0 };
   let heartbeatTimer = null;
   const debugVoice = (message) => { if (state.debug) console.log(message); };
   const els = {
     dot: $('#connection-dot'), close: $('#close-popup'), start: $('#start-listening'), stop: $('#stop-listening'),
     micState: $('#mic-state'), voiceStatus: $('#voice-status'), transcript: $('#transcript'), reply: $('#reply'),
+    guard: $('#guard-badge'),
   };
 
   function setVoiceStatus(message, error = false) {
@@ -41,6 +49,18 @@
     els.dot.classList.toggle('online', online);
     els.dot.classList.toggle('offline', !online);
     els.dot.title = online ? 'BRO backend ready' : 'BRO backend offline';
+  }
+
+  // The badge is always visible so the user can see which guardrail level is
+  // active and whether the master lock is on before they speak.
+  function renderGuardrails(info) {
+    if (!info || !els.guard) return;
+    const mode = String(info.mode || 'guarded').toLowerCase();
+    const locked = Boolean(info.locked);
+    els.guard.textContent = `${mode.toUpperCase()}${locked ? ' · LOCKED' : ''}`;
+    els.guard.title = `Guardrails: ${mode}${locked ? ' (master lock on)' : ''}${info.pending ? ` · ${info.pending} waiting for approval` : ''}`;
+    els.guard.classList.toggle('locked', locked);
+    els.guard.classList.toggle('strict', !locked && mode === 'strict');
   }
 
   function renderUi() {
@@ -100,6 +120,113 @@
       hideTimer = null;
       if (state.phase === 'awake' || state.phase === 'idle') hideWindow();
     }, delayMs);
+  }
+
+  // ---- Conversation window -------------------------------------------------
+  // After a command finishes — whether it worked or failed — BRO keeps the
+  // microphone open for FOLLOW_UP_MS. Anything you say in that window is run
+  // as a new command without saying “BRO” again. Twenty seconds of silence
+  // ends the window and returns BRO to wake-word-only mode.
+
+  function cancelFollowUp() {
+    state.followUp = false;
+    state.followUpToken += 1;
+    state.followUpDeadline = 0;
+  }
+
+  function startFollowUp() {
+    if (!state.wake) return;
+    cancelAutoHide();
+    state.followUp = true;
+    state.followUpDeadline = Date.now() + FOLLOW_UP_MS;
+    state.followUpToken += 1;
+    const token = state.followUpToken;
+    setVoiceStatus('Listening — say your next command (20 s).');
+    followUpLoop(token).catch((error) => {
+      console.warn(`BRO follow-up stopped: ${error.message}`);
+      if (state.followUpToken === token) endFollowUp({ quiet: true });
+    });
+  }
+
+  function endFollowUp({ quiet = false } = {}) {
+    if (!state.followUp) return;
+    cancelFollowUp();
+    state.phase = 'idle';
+    renderUi();
+    if (state.wake) {
+      startWakeMode({ quiet });
+      scheduleAutoHide();
+    } else {
+      closeMic();
+    }
+  }
+
+  async function followUpLoop(token) {
+    setVoiceStatus('Listening — say your next command (20 s).');
+    while (state.followUp && state.followUpToken === token && state.wake) {
+      const remaining = state.followUpDeadline - Date.now();
+      if (remaining < 900) break;
+      let mic;
+      try {
+        mic = await ensureMic();
+      } catch (error) {
+        state.phase = 'idle';
+        renderUi();
+        setVoiceStatus(describeMicError(error), true);
+        break;
+      }
+      if (state.followUpToken !== token || !state.followUp) return;
+      mic.stopWatch();
+      state.phase = 'listening';
+      renderUi();
+      setVoiceStatus('Listening — say your next command (20 s).');
+      let clip;
+      try {
+        clip = await mic.capture({ ...CAPTURE_OPTIONS, noSpeechMs: Math.min(remaining, FOLLOW_UP_MS), onLevel: setLevel });
+      } catch (error) {
+        setVoiceStatus(`Listening failed: ${error.message}`, true);
+        break;
+      }
+      if (state.followUpToken !== token || !state.followUp || !state.wake) return;
+      if (clip.reason === 'cancelled' || clip.reason === 'manual') break;
+      // No speech for the rest of the window: go back to sleep.
+      if (clip.reason === 'no-speech' || clip.durationMs < 250) break;
+
+      state.phase = 'transcribing';
+      renderUi();
+      setVoiceStatus('Transcribing…');
+      let spoken = '';
+      try {
+        const result = await api('/api/voice/transcribe', {
+          method: 'POST',
+          body: JSON.stringify({ audio: clip.audio, sampleRate: clip.sampleRate, durationMs: clip.durationMs }),
+        });
+        spoken = normalizeSpeech(result.text);
+      } catch (error) {
+        // Keep the conversation open so the user can simply try again.
+        els.reply.textContent = `BRO could not hear that: ${error.message}`;
+        setVoiceStatus('I did not catch that. Still listening — try again.', true);
+        state.followUpDeadline = Date.now() + FOLLOW_UP_MS;
+        continue;
+      }
+      if (state.followUpToken !== token || !state.followUp) return;
+      if (!spoken) {
+        setVoiceStatus('I’m here — go ahead.');
+        state.followUpDeadline = Date.now() + FOLLOW_UP_MS;
+        continue;
+      }
+      if (SLEEP_COMMAND.test(spoken)) {
+        els.transcript.textContent = spoken;
+        await sleepBro('Going to sleep. Say “BRO” or press Ctrl + Alt + B to wake me.');
+        return;
+      }
+      els.transcript.textContent = spoken;
+      state.followUpDeadline = Date.now() + FOLLOW_UP_MS;
+      await sendCommand(spoken);
+      // sendCommand keeps state.followUp set, so this loop continues and the
+      // next sentence is treated as another command.
+    }
+    endFollowUp({ quiet: true });
   }
 
   function describeMicError(error) {
@@ -179,15 +306,30 @@
     scheduleAutoHide();
   }
 
-  async function sleepBro(message = 'Microphone off. Press Ctrl + Alt + B when you want to talk again.') {
-    state.wake = false;
-    stopHeartbeat();
-    if (state.mic) state.mic.stopWatch();
-    state.phase = 'idle';
-    closeMic();
+  // Going to sleep hides the popup right away. The microphone is kept open in
+  // wake-word mode, so “BRO” — or Ctrl + Alt + B — pops the window back up.
+  async function sleepBro(message = 'Going to sleep. Say “BRO” or press Ctrl + Alt + B to wake me.', { hide = true } = {}) {
+    cancelFollowUp();
+    cancelAutoHide();
+    state.wake = true;
+    setLevel(0);
+    const hideSoon = () => {
+      if (hide) setTimeout(() => { if (state.phase === 'awake') hideWindow(); }, 900);
+    };
+    if (!state.mic) {
+      state.phase = 'idle';
+      renderUi();
+      setVoiceStatus(message);
+      hideSoon();
+      await startWakeMode({ quiet: true });
+      return;
+    }
+    state.phase = 'awake';
     renderUi();
     setVoiceStatus(message);
-    scheduleAutoHide(5000);
+    startHeartbeat();
+    resumeWatch();
+    hideSoon();
   }
 
   async function handleWakeClip(clip) {
@@ -251,7 +393,7 @@
     els.reply.textContent = '\u00a0';
     renderUi();
     setVoiceStatus('Listening… speak your command.');
-    const clip = await mic.capture({ ...CAPTURE_OPTIONS, onLevel: setLevel });
+    const clip = await mic.capture({ ...CAPTURE_OPTIONS, preRollMs: 1200, onLevel: setLevel });
     if (state.phase !== 'listening') return;
     if (clip.reason === 'cancelled') {
       state.phase = 'idle';
@@ -276,8 +418,9 @@
   function finishCycle() {
     state.phase = 'idle';
     renderUi();
-    // Keep whatever message the caller just set (usually an error or retry hint).
-    if (state.wake) startWakeMode({ quiet: true });
+    // Keep the conversation window open after a miss or an error, so the user
+    // can just speak again instead of reaching for the hotkey.
+    if (state.wake) startFollowUp();
     else {
       closeMic();
       if (!els.voiceStatus.classList.contains('error')) setVoiceStatus('Press Ctrl + Alt + B once to listen.');
@@ -287,6 +430,14 @@
 
   async function sendCommand(message) {
     if (!message || state.phase === 'working') return;
+    // “go to sleep mode” / “sleep” / “disappear” hides the popup immediately,
+    // even as the very first command after the wake word.
+    if (SLEEP_COMMAND.test(String(message).trim())) {
+      console.log('BRO sleep command captured');
+      els.transcript.textContent = message;
+      await sleepBro('Going to sleep. Say “BRO” or press Ctrl + Alt + B to wake me.');
+      return;
+    }
     console.log(`BRO command captured (${message.length} chars)`);
     debugVoice(`BRO transcript: ${message}`);
     if (state.mic) state.mic.stopWatch();
@@ -298,7 +449,11 @@
     try {
       const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message, context: state.context }) });
       if (data.context && typeof data.context === 'object') { state.context = data.context; saveContext(); }
+      renderGuardrails(data.guardrails);
       els.reply.textContent = data.reply || 'Done.';
+      if (Array.isArray(data.approvals) && data.approvals.length) {
+        setVoiceStatus('Waiting for your approval — say “yes” or “no”.');
+      }
       if (Array.isArray(data.actions) && data.actions.length) els.reply.textContent = `${els.reply.textContent} Open the full app to review the pending action.`;
       setConnection(true);
     } catch (error) {
@@ -307,10 +462,13 @@
     } finally {
       state.phase = 'idle';
       renderUi();
-      if (state.wake) {
-        setVoiceStatus('Say “BRO” for the next command — or press Ctrl + Alt + B.');
-        startWakeMode();
-        scheduleAutoHide();
+      if (state.followUp) {
+        // The follow-up loop is already waiting for the next sentence.
+        setVoiceStatus('Listening — say your next command (20 s).');
+      } else if (state.wake) {
+        // Start the 20-second conversation window instead of asking for the
+        // wake word again. Works the same after a successful reply or an error.
+        startFollowUp();
       } else {
         closeMic();
         setVoiceStatus('Done. Press Ctrl + Alt + B once for the next command.');
@@ -369,6 +527,7 @@
       const data = await api('/api/bootstrap');
       setConnection(true);
       state.engine = data.voice || null;
+      renderGuardrails(data.guardrails);
       if (!state.engine || state.engine.available === false) {
         setVoiceStatus((state.engine && state.engine.reason) || 'Press Ctrl + Alt + B once to listen', true);
       } else {
@@ -398,11 +557,12 @@
   els.stop.addEventListener('click', stopPressed);
   els.close.addEventListener('click', () => {
     state.wake = false;
+    cancelFollowUp();
     closeMic();
     if (window.broDesktop && typeof window.broDesktop.closeOverlay === 'function') window.broDesktop.closeOverlay();
     else window.close();
   });
-  window.addEventListener('beforeunload', () => { state.wake = false; closeMic(); });
+  window.addEventListener('beforeunload', () => { state.wake = false; cancelFollowUp(); closeMic(); });
 
   loadContext();
   state.debug = Boolean(window.broDesktop && window.broDesktop.voiceDebug);

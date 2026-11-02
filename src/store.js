@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DEFAULT_MODEL, DEFAULT_PROTOCOL, providerInfo, normalizeProtocol } = require('./provider');
+const { DEFAULT_MODE, normalizeMode } = require('./guardrails');
 
 class ValidationError extends Error {
   constructor(message) {
@@ -57,9 +58,10 @@ function writeJson(file, value) {
   fs.renameSync(temporary, file);
 }
 
-function createStore(dataDir = path.join(__dirname, '..', 'data')) {
+function createStore(dataDir = process.env.BRO_DATA_DIR ? path.resolve(process.env.BRO_DATA_DIR) : path.join(__dirname, '..', 'data')) {
   const stateFile = path.join(dataDir, 'state.json');
   const settingsFile = path.join(dataDir, 'settings.json');
+  const guardrailsFile = path.join(dataDir, 'guardrails.json');
   fs.mkdirSync(dataDir, { recursive: true });
 
   function loadState() {
@@ -76,6 +78,32 @@ function createStore(dataDir = path.join(__dirname, '..', 'data')) {
       protocol: normalizeProtocol(typeof settings.protocol === 'string' && settings.protocol ? settings.protocol : (process.env.BRO_AI_PROTOCOL || DEFAULT_PROTOCOL)),
       apiKey: typeof settings.apiKey === 'string' && settings.apiKey ? settings.apiKey : (process.env.BRO_AI_API_KEY || '')
     };
+  }
+
+  // Guardrail state lives in its own file so provider settings can be saved
+  // without ever resetting a safety choice the user made.
+  function loadGuardrails() {
+    const saved = readJson(guardrailsFile, {});
+    const mode = normalizeMode(saved && saved.mode) || DEFAULT_MODE;
+    return {
+      mode,
+      locked: Boolean(saved && saved.locked),
+      updatedAt: typeof (saved && saved.updatedAt) === 'string' ? saved.updatedAt : null
+    };
+  }
+
+  function updateGuardrails({ mode, locked } = {}) {
+    const current = loadGuardrails();
+    let nextMode = current.mode;
+    if (mode !== undefined) {
+      const wanted = normalizeMode(mode);
+      if (!wanted) throw new ValidationError(`Guardrail mode must be one of: strict, guarded, trusted.`);
+      nextMode = wanted;
+    }
+    const nextLocked = locked === undefined ? current.locked : Boolean(locked);
+    const next = { mode: nextMode, locked: nextLocked, updatedAt: new Date().toISOString() };
+    writeJson(guardrailsFile, next);
+    return { ...next };
   }
 
   function publicProject(project) {
@@ -149,8 +177,11 @@ function createStore(dataDir = path.join(__dirname, '..', 'data')) {
     dataDir,
     stateFile,
     settingsFile,
+    guardrailsFile,
     loadState,
     loadSettings,
+    loadGuardrails,
+    updateGuardrails,
     listProjects,
     getProject,
     registerProject,

@@ -150,3 +150,33 @@ test('Ctrl+Alt+B stays a one-shot global shortcut handled by the popup', () => {
   assert.match(overlaySource, /if \(state\.phase !== 'idle'\) return/);
   assert.match(overlaySource, /Done\. Press Ctrl \+ Alt \+ B once for the next command/);
 });
+
+test('common voice spellings and leading fillers are repaired', () => {
+  const voice = require('../src/voice');
+  assert.equal(voice.cleanCommandTranscript('Um, open settings'), 'open settings');
+  assert.equal(voice.cleanCommandTranscript('okay, play the next video'), 'play the next video');
+  assert.equal(voice.cleanCommandTranscript('BRO open settings'), 'open settings');
+  assert.equal(voice.cleanCommandTranscript('Bros open settings'), 'open settings');
+  assert.equal(voice.cleanCommandTranscript('hey there bro open settings'), 'open settings');
+  assert.equal(voice.cleanCommandTranscript('maximise the window'), 'maximize the window');
+  assert.equal(voice.cleanCommandTranscript('minimise it'), 'minimize it');
+  assert.equal(voice.cleanCommandTranscript('play the next vedio'), 'play the next video');
+  assert.equal(voice.cleanCommandTranscript('open you tube'), 'open YouTube');
+  assert.equal(voice.cleanCommandTranscript('uh hmm'), '');
+  // Wake phrases must survive untouched.
+  assert.equal(voice.cleanTranscript('hey there bro'), 'hey there bro');
+  assert.equal(voice.cleanTranscript('bro listen'), 'bro listen');
+});
+
+test('command capture keeps the audio spoken during the wake check', async () => {
+  const recorder = loadRecorder();
+  const mic = new recorder.Microphone();
+  mic.sampleRate = 16000;
+  mic.handleSamples(new Float32Array(8000).fill(0.2)); // 0.5 s of recent speech
+  const pending = mic.capture({ preRollMs: 1200, silenceMs: 1100, noSpeechMs: 6000, maxMs: 15000 });
+  mic.finishClip('manual');
+  const clip = await pending;
+  const wav = Buffer.from(clip.audio, 'base64');
+  assert.ok(clip.durationMs >= 400, `kept ${clip.durationMs}ms`);
+  assert.ok(wav.length > 800, 'pre-roll audio is part of the clip');
+});

@@ -86,21 +86,22 @@ test('close commands resolve apps, everything, and the last target', async () =>
   assert.deepEqual(multiple.actions.map((action) => action.args.id), ['telegram', 'chrome']);
 });
 
-test('“close that” replays the last opened app but not a website', async () => {
+test('“close that” replays the last opened app or website', async () => {
   const lastTarget = { kind: 'app', id: 'telegram', label: 'Telegram' };
   const result = await handleChat({ ...emptyContext, message: 'close that', context: { lastTarget } });
   assert.equal(result.actions[0].type, 'close_app');
   assert.equal(result.actions[0].args.id, 'telegram');
 
   const site = await handleChat({ ...emptyContext, message: 'close that', context: { lastTarget: { kind: 'site', url: 'https://www.youtube.com/' } } });
-  assert.deepEqual(site.actions, []);
-  assert.match(site.reply, /browser tabs/i);
+  assert.equal(site.actions[0].type, 'close_website');
+  assert.match(site.reply, /closing the .*tab/i);
 });
 
-test('closing a website explains, and an uncatalogued name still gets a close attempt', async () => {
+test('closing a website targets its tab, and an uncatalogued name still gets a close attempt', async () => {
   const site = await handleChat({ ...emptyContext, message: 'close gmail' });
-  assert.deepEqual(site.actions, []);
-  assert.match(site.reply, /web page/i);
+  assert.equal(site.actions[0].type, 'close_website');
+  assert.equal(site.actions[0].args.name, 'gmail');
+  assert.match(site.reply, /closing gmail/i);
 
   // Anything else is still attempted by process name and window title, so
   // “close <whatever I opened>” always does something.

@@ -33,6 +33,9 @@
           <button class="nav-item" type="button" data-view="workspace">
             <span class="nav-icon" aria-hidden="true">▦</span><span>Workspace</span>
           </button>
+          <button class="nav-item" type="button" data-view="guardrails">
+            <span class="nav-icon" aria-hidden="true">⌑</span><span>Guardrails</span><span class="nav-count" id="guard-count">0</span>
+          </button>
           <button class="nav-item" type="button" data-view="settings">
             <span class="nav-icon" aria-hidden="true">⚙</span><span>Provider</span>
           </button>
@@ -123,6 +126,43 @@
               </form>
             </div>
             <div class="projects-panel"><div class="section-line"><h3>Registered projects</h3><span class="muted" id="project-count">0 projects</span></div><div class="project-list" id="project-list"></div></div>
+          </div>
+        </section>
+
+        <section class="view" id="guardrails-view" data-view-panel="guardrails" aria-labelledby="guardrails-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">YOUR CONTROL CENTER</p><h2 id="guardrails-title">Guardrails</h2><p>You hold the key. BRO asks before anything that changes your PC.</p></div>
+            <button class="secondary-button" type="button" id="refresh-guardrails">Refresh</button>
+          </div>
+          <div class="settings-layout">
+            <div class="panel settings-panel">
+              <div class="panel-heading"><div><h3>Control level</h3><p>Choose how much BRO may do without asking.</p></div><span class="settings-badge" id="guard-mode-badge">GUARDED</span></div>
+              <div class="guard-modes" id="guard-modes" role="radiogroup" aria-label="Guardrail level">
+                <button class="guard-mode-card" type="button" data-mode="strict" role="radio">
+                  <strong>Strict</strong><span>Every action that touches the PC waits for your yes — even “open Chrome”.</span>
+                </button>
+                <button class="guard-mode-card" type="button" data-mode="guarded" role="radio">
+                  <strong>Guarded</strong><span>Opening, typing, playback, and scrolling run. File changes, closing apps, and power actions wait for your yes.</span>
+                </button>
+                <button class="guard-mode-card" type="button" data-mode="trusted" role="radio">
+                  <strong>Trusted</strong><span>Only destructive actions — shutdown, delete, close everything — wait for your yes.</span>
+                </button>
+              </div>
+              <div class="guard-lock-row">
+                <div><strong>Master lock</strong><p>When the lock is on, nothing that changes your PC runs. Say “unlock controls” or turn it off here.</p></div>
+                <button class="secondary-button" type="button" id="guard-lock" aria-pressed="false">Lock everything</button>
+              </div>
+            </div>
+            <div class="settings-aside">
+              <div class="panel">
+                <div class="panel-heading"><div><h3>Waiting for you</h3><p>Actions that need your approval. One yes runs one action.</p></div></div>
+                <div class="approval-list" id="approval-list"><p class="muted">Nothing is waiting for approval.</p></div>
+              </div>
+              <div class="panel">
+                <div class="panel-heading"><div><h3>Recent activity</h3><p>Every action and decision, newest first.</p></div></div>
+                <div class="audit-list" id="audit-list"><p class="muted">No activity recorded yet.</p></div>
+              </div>
+            </div>
           </div>
         </section>
 

@@ -150,10 +150,10 @@ test('open that replays only an unambiguous recognized last target', async () =>
   const replay = await handleChat({ ...emptyContext, message: 'open that', context: first.context });
   assert.deepEqual(replay.actions, [{ id: 'open_desktop_target', type: 'open_desktop_target', args: { target: 'downloads' }, label: 'Open Downloads' }]);
 
-  const site = await handleChat({ ...emptyContext, message: 'Open GitHub' });
+  const site = await handleChat({ ...emptyContext, message: 'Open YouTube' });
   const siteReplay = await handleChat({ ...emptyContext, message: 'open it', context: site.context });
   assert.equal(siteReplay.actions[0].type, 'open_url');
-  assert.equal(siteReplay.actions[0].args.url, 'https://github.com/');
+  assert.equal(siteReplay.actions[0].args.url, 'https://www.youtube.com/');
 
   const ambiguous = await handleChat({ ...emptyContext, message: 'open that' });
   assert.deepEqual(ambiguous.actions, []);

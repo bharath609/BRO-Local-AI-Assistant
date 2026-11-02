@@ -5,12 +5,12 @@
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const CHAT_STORAGE_KEY = 'bro-chat-history-v1';
   const CONTEXT_STORAGE_KEY = 'bro-last-target-v1';
-  const state = { view: 'chat', messages: [], projects: [], settings: {}, user: { displayName: 'Bharath' }, context: {}, online: false, readAloud: false, busy: false, recognition: null, voice: null };
+  const state = { view: 'chat', messages: [], projects: [], settings: {}, user: { displayName: 'Bharath' }, context: {}, online: false, readAloud: false, busy: false, recognition: null, voice: null, guardrails: { mode: 'guarded', locked: false, pending: 0 }, approvals: [] };
 
   const els = {
-    views: $$('.view'), nav: $$('.nav-item'), title: $('#view-title'), eyebrow: $('#view-eyebrow'), welcome: $('#welcome-state'), welcomeHeading: $('#welcome-heading'), messages: $('#messages'), actionFeed: $('#action-feed'), typing: $('#typing-indicator'), input: $('#message-input'), chatForm: $('#chat-form'), send: $('#send-button'), mic: $('#mic-button'), speaker: $('#speaker-toggle'), connectionDot: $('#connection-dot'), connectionLabel: $('#connection-label'), connectionDetail: $('#connection-detail'), serverAlert: $('#server-alert'), serverAlertText: $('#server-alert-text'), toast: $('#toast'), projects: $('#project-list'), projectCount: $('#project-count'), projectForm: $('#project-form'), projectFormPanel: $('#project-form-panel'), projectMessage: $('#project-form-message'), settingsForm: $('#settings-form'), settingsMessage: $('#settings-message')
+    views: $$('.view'), nav: $$('.nav-item'), title: $('#view-title'), eyebrow: $('#view-eyebrow'), welcome: $('#welcome-state'), welcomeHeading: $('#welcome-heading'), messages: $('#messages'), actionFeed: $('#action-feed'), typing: $('#typing-indicator'), input: $('#message-input'), chatForm: $('#chat-form'), send: $('#send-button'), mic: $('#mic-button'), speaker: $('#speaker-toggle'), connectionDot: $('#connection-dot'), connectionLabel: $('#connection-label'), connectionDetail: $('#connection-detail'), serverAlert: $('#server-alert'), serverAlertText: $('#server-alert-text'), toast: $('#toast'), projects: $('#project-list'), projectCount: $('#project-count'), projectForm: $('#project-form'), projectFormPanel: $('#project-form-panel'), projectMessage: $('#project-form-message'), settingsForm: $('#settings-form'), settingsMessage: $('#settings-message'), guardModes: $('#guard-modes'), guardBadge: $('#guard-mode-badge'), guardLock: $('#guard-lock'), guardCount: $('#guard-count'), approvalList: $('#approval-list'), auditList: $('#audit-list')
   };
-  const viewCopy = { chat: ['PERSONAL ASSISTANT', 'Good to see you, Bharath.'], workspace: ['YOUR WORKSPACE', 'Projects'], settings: ['LOCAL CONFIGURATION', 'Provider settings'] };
+  const viewCopy = { chat: ['PERSONAL ASSISTANT', 'Good to see you, Bharath.'], workspace: ['YOUR WORKSPACE', 'Projects'], guardrails: ['YOUR CONTROL CENTER', 'Guardrails'], settings: ['LOCAL CONFIGURATION', 'Provider settings'] };
 
   function text(value, fallback = '') { return value == null ? fallback : String(value); }
   function saveMessages() { try { window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(state.messages.slice(-80))); } catch (_) { /* local persistence is best effort */ } }
@@ -30,6 +30,7 @@
     els.views.forEach(panel => { const active = panel.dataset.viewPanel === view; panel.hidden = !active; panel.classList.toggle('active', active); });
     els.eyebrow.textContent = viewCopy[view][0]; els.title.textContent = viewCopy[view][1]; document.title = `BRO · ${viewCopy[view][1]}`;
     $('.sidebar')?.classList.remove('open');
+    if (view === 'guardrails') { renderApprovals(); loadAudit(); }
   }
   function setBusy(busy, showThinking = busy) { state.busy = busy; els.send.disabled = busy; els.input.disabled = busy; els.typing.hidden = !showThinking; }
   function isLightConversation(message) { const value = text(message).trim(); const greeting = /\b(?:hey|hi|hello|welcome|good\s+(?:morning|afternoon|evening))\b/i.test(value); const action = /https?:\/\/|\b(?:open|visit|go\s+to|run|execute|list|show|search|find|google|status|health|help|activate|wake\s+up)\b/i.test(value); return greeting && !action; }
@@ -64,6 +65,122 @@
     if (!response.ok) throw new Error(data?.error || data?.message || `Request failed (${response.status})`);
     return data || {};
   }
+  // ---- Guardrails UI -------------------------------------------------------
+  const GUARD_COPY = {
+    strict: ['STRICT', 'Every action waits for your yes.'],
+    guarded: ['GUARDED', 'File changes, closing, and power actions wait for your yes.'],
+    trusted: ['TRUSTED', 'Only destructive actions wait for your yes.'],
+  };
+
+  function applyGuardrails(info, approvals = state.approvals) {
+    if (info && typeof info === 'object') {
+      const mode = ['strict', 'guarded', 'trusted'].includes(info.mode) ? info.mode : 'guarded';
+      state.guardrails = { mode, locked: Boolean(info.locked), pending: Number(info.pending) || 0, updatedAt: info.updatedAt || null };
+    }
+    if (Array.isArray(approvals)) state.approvals = approvals;
+    const [label, copy] = GUARD_COPY[state.guardrails.mode] || GUARD_COPY.guarded;
+    if (els.guardBadge) {
+      els.guardBadge.textContent = state.guardrails.locked ? `${label} · LOCKED` : label;
+      els.guardBadge.classList.toggle('locked', state.guardrails.locked);
+      els.guardBadge.title = copy;
+    }
+    if (els.guardModes) {
+      $$('.guard-mode-card', els.guardModes).forEach((button) => {
+        const active = button.dataset.mode === state.guardrails.mode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-checked', active ? 'true' : 'false');
+      });
+    }
+    if (els.guardLock) {
+      els.guardLock.textContent = state.guardrails.locked ? 'Unlock everything' : 'Lock everything';
+      els.guardLock.classList.toggle('danger', state.guardrails.locked);
+      els.guardLock.setAttribute('aria-pressed', state.guardrails.locked ? 'true' : 'false');
+    }
+    if (els.guardCount) {
+      const waiting = state.approvals.length;
+      els.guardCount.textContent = String(waiting);
+      els.guardCount.classList.toggle('attention', waiting > 0);
+    }
+    renderApprovals();
+  }
+
+  function renderApprovals() {
+    if (!els.approvalList) return;
+    els.approvalList.textContent = '';
+    if (!state.approvals.length) {
+      const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = 'Nothing is waiting for approval.'; els.approvalList.append(empty); return;
+    }
+    state.approvals.forEach((approval) => {
+      const card = document.createElement('article'); card.className = 'approval-card';
+      const title = document.createElement('strong'); title.textContent = approval.label || 'Action';
+      const prompt = document.createElement('p'); prompt.textContent = approval.prompt || 'This action needs your approval.';
+      const actions = document.createElement('div'); actions.className = 'approval-actions';
+      const deny = document.createElement('button'); deny.type = 'button'; deny.className = 'dismiss-button'; deny.textContent = 'Deny';
+      const allow = document.createElement('button'); allow.type = 'button'; allow.className = 'approve-button'; allow.textContent = 'Approve';
+      const result = document.createElement('p'); result.className = 'approval-result';
+      deny.addEventListener('click', () => decideApproval(approval.id, false, card, result, allow, deny));
+      allow.addEventListener('click', () => decideApproval(approval.id, true, card, result, allow, deny));
+      actions.append(deny, allow); card.append(title, prompt, actions, result); els.approvalList.append(card);
+    });
+  }
+
+  async function decideApproval(id, approve, card, result, allow, deny) {
+    allow.disabled = true; deny.disabled = true; result.textContent = approve ? 'Running…' : 'Cancelling…';
+    try {
+      const data = await api(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ approve }) });
+      result.textContent = data.reply || (approve ? 'Approved.' : 'Denied.');
+      const finished = approve === false || data.executed === true;
+      card.classList.toggle('resolved', finished);
+      if (!finished) { allow.disabled = false; deny.disabled = false; }
+      await refreshGuardrails();
+      await loadAudit();
+    } catch (error) {
+      result.textContent = errorMessage(error); allow.disabled = false; deny.disabled = false;
+    }
+  }
+
+  async function refreshGuardrails() {
+    try { const data = await api('/api/guardrails'); applyGuardrails(data.guardrails, data.approvals); return data; }
+    catch (_) { return null; }
+  }
+
+  async function loadAudit() {
+    if (!els.auditList) return;
+    try {
+      const data = await api('/api/audit?limit=20');
+      els.auditList.textContent = '';
+      const entries = Array.isArray(data.entries) ? data.entries : [];
+      if (!entries.length) {
+        const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = 'No activity recorded yet.'; els.auditList.append(empty); return;
+      }
+      entries.forEach((entry) => {
+        const row = document.createElement('div'); row.className = `audit-row ${text(entry.decision, '')}`;
+        const time = document.createElement('span'); time.className = 'audit-time'; time.textContent = entry.at ? new Date(entry.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+        const decision = document.createElement('span'); decision.className = 'audit-decision'; decision.textContent = text(entry.decision, 'action').replace(/_/g, ' ');
+        const label = document.createElement('span'); label.className = 'audit-label'; label.textContent = text(entry.label, entry.type || 'Action');
+        row.append(time, decision, label); els.auditList.append(row);
+      });
+    } catch (_) { /* the audit view stays empty if the server is offline */ }
+  }
+
+  async function setGuardMode(mode) {
+    try {
+      const data = await api('/api/guardrails', { method: 'POST', body: JSON.stringify({ mode }) });
+      applyGuardrails(data.guardrails);
+      showToast(`Guardrails set to ${state.guardrails.mode}.`);
+      await loadAudit();
+    } catch (error) { showToast(errorMessage(error)); }
+  }
+
+  async function toggleGuardLock() {
+    try {
+      const data = await api('/api/guardrails', { method: 'POST', body: JSON.stringify({ locked: !state.guardrails.locked }) });
+      applyGuardrails(data.guardrails);
+      showToast(state.guardrails.locked ? 'Master lock is on. Nothing will change your PC.' : 'Master lock is off.');
+      await loadAudit();
+    } catch (error) { showToast(errorMessage(error)); }
+  }
+
   function normalizeBootstrap(data) {
     const projects = data.projects || data.workspace?.projects || data.data?.projects || [];
     state.projects = Array.isArray(projects) ? projects : [];
@@ -74,6 +191,7 @@
     state.settings = data.settings || data.provider || data.config || {};
     if (data.context && typeof data.context === 'object') { state.context = data.context; saveContext(); }
     if (data.voice && typeof data.voice === 'object') state.voice = data.voice;
+    applyGuardrails(data.guardrails, Array.isArray(data.approvals) ? data.approvals : state.approvals);
     const history = data.history || data.messages || data.conversation;
     if (!state.messages.length && Array.isArray(history)) renderHistory(history);
     renderProjects(); fillSettings(); if (state.view === 'chat') setView('chat');
@@ -114,13 +232,58 @@
   }
   async function executeAction(action, card, result, primary, secondary) {
     primary.disabled = true; if (secondary) secondary.disabled = true; result.className = 'action-result'; result.textContent = 'Working…';
-    try { const data = await api('/api/action', { method: 'POST', body: JSON.stringify({ action }) }); result.className = 'action-result success'; result.textContent = resultText(data); await refreshBootstrap(false); }
+    try {
+      const data = await api('/api/action', { method: 'POST', body: JSON.stringify({ action }) });
+      if (data.approval) {
+        result.className = 'action-result';
+        result.textContent = data.approval.prompt || 'This action needs your approval.';
+        applyGuardrails(data.guardrails);
+        await loadAudit();
+        const allow = primary.cloneNode(true); allow.textContent = 'Approve'; allow.disabled = false;
+        const deny = document.createElement('button'); deny.type = 'button'; deny.className = 'dismiss-button'; deny.textContent = 'Deny';
+        allow.addEventListener('click', () => decideApproval(data.approval.id, true, card, result, allow, deny));
+        deny.addEventListener('click', () => decideApproval(data.approval.id, false, card, result, allow, deny));
+        const buttonRow = primary.parentNode;
+        primary.replaceWith(allow);
+        if (secondary) secondary.replaceWith(deny);
+        else buttonRow.append(deny);
+        return;
+      }
+      result.className = 'action-result success'; result.textContent = resultText(data); await refreshBootstrap(false);
+    }
     catch (error) { result.className = 'action-result error'; result.textContent = errorMessage(error); primary.disabled = false; if (secondary) secondary.disabled = false; }
   }
+  function appendApproval(approval) {
+    const card = document.createElement('article'); card.className = 'action-card approval';
+    const head = document.createElement('div'); head.className = 'action-card-head';
+    const icon = document.createElement('div'); icon.className = 'action-card-icon'; icon.textContent = '!'; icon.setAttribute('aria-hidden', 'true');
+    const body = document.createElement('div');
+    const title = document.createElement('h4'); title.textContent = 'Approval needed';
+    const summary = document.createElement('p'); summary.textContent = approval.prompt || `Approve “${approval.label || 'this action'}”?`;
+    body.append(title, summary); head.append(icon, body); card.append(head);
+    const buttons = document.createElement('div'); buttons.className = 'action-buttons';
+    const result = document.createElement('div'); result.className = 'action-result';
+    const deny = document.createElement('button'); deny.type = 'button'; deny.className = 'dismiss-button'; deny.textContent = 'Deny';
+    const allow = document.createElement('button'); allow.type = 'button'; allow.className = 'approve-button'; allow.textContent = 'Approve';
+    deny.addEventListener('click', () => decideApproval(approval.id, false, card, result, allow, deny));
+    allow.addEventListener('click', () => decideApproval(approval.id, true, card, result, allow, deny));
+    buttons.append(deny, allow); card.append(buttons, result); els.actionFeed.append(card); scrollChat();
+  }
+
   async function sendMessage(value = els.input.value) {
     const message = text(value).trim(); if (!message || state.busy) return;
     addMessage('user', message); els.input.value = ''; resizeInput(); setBusy(true, !isLightConversation(message));
-    try { const history = state.messages.slice(0, -1).slice(-20); const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message, history, context: state.context }) }); if (data.context && typeof data.context === 'object') { state.context = data.context; saveContext(); } const reply = getChatReply(data); if (reply) addMessage('assistant', reply, new Date(), true); getActions(data).forEach(appendAction); if (!reply && !getActions(data).length) addMessage('assistant', 'I received that, but the backend did not return a message.'); }
+    try {
+      const history = state.messages.slice(0, -1).slice(-20);
+      const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message, history, context: state.context }) });
+      if (data.context && typeof data.context === 'object') { state.context = data.context; saveContext(); }
+      applyGuardrails(data.guardrails, data.approvals);
+      const reply = getChatReply(data); if (reply) addMessage('assistant', reply, new Date(), true);
+      getActions(data).forEach(appendAction);
+      (Array.isArray(data.approvals) ? data.approvals : []).forEach(appendApproval);
+      if (!reply && !getActions(data).length && !(data.approvals || []).length) addMessage('assistant', 'I received that, but the backend did not return a message.');
+      if ((data.approvals || []).length) loadAudit();
+    }
     catch (error) { addMessage('assistant', `I couldn’t reach the local backend. ${errorMessage(error)}`); setConnection(false, 'Chat request failed'); }
     finally { setBusy(false); els.input.focus(); scrollChat(); }
   }
@@ -177,6 +340,9 @@
     els.projectForm.addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(els.projectForm); const commands = {}; ['dev', 'test', 'build', 'lint'].forEach(key => { if (form.get(key)) commands[key] = form.get(key); }); const payload = { name: form.get('name'), root: form.get('root'), commands }; const button = $('button[type="submit"]', els.projectForm); button.disabled = true; setFormMessage(els.projectMessage, 'Registering…'); try { await api('/api/projects/register', { method: 'POST', body: JSON.stringify(payload) }); els.projectForm.reset(); els.projectFormPanel.hidden = true; showToast('Project added.'); await refreshBootstrap(false); } catch (error) { setFormMessage(els.projectMessage, errorMessage(error), true); } finally { button.disabled = false; } });
     $('#openai-gpt-preset').addEventListener('click', () => { $('#base-url').value = 'https://api.openai.com/v1'; $('#model').value = 'gpt-6.1-sol'; $('#protocol').value = 'responses'; $('#api-key').focus(); setFormMessage(els.settingsMessage, 'Preset filled. Add your API key, then save.'); });
     els.settingsForm.addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(els.settingsForm); const payload = { baseUrl: form.get('baseUrl'), model: form.get('model'), protocol: form.get('protocol'), apiKey: form.get('apiKey') }; const button = $('button[type="submit"]', els.settingsForm); button.disabled = true; setFormMessage(els.settingsMessage, 'Saving locally…'); try { await api('/api/settings', { method: 'POST', body: JSON.stringify(payload) }); $('#api-key').value = ''; setFormMessage(els.settingsMessage, 'Saved. The key will not be shown again.'); showToast('Provider settings saved.'); await refreshBootstrap(false); } catch (error) { setFormMessage(els.settingsMessage, errorMessage(error), true); } finally { button.disabled = false; } });
+    els.guardModes?.addEventListener('click', (event) => { const button = event.target.closest('.guard-mode-card'); if (button && button.dataset.mode) setGuardMode(button.dataset.mode); });
+    els.guardLock?.addEventListener('click', toggleGuardLock);
+    $('#refresh-guardrails')?.addEventListener('click', async () => { try { const data = await api('/api/guardrails'); applyGuardrails(data.guardrails, data.approvals); await loadAudit(); showToast('Guardrails refreshed.'); } catch (error) { showToast(errorMessage(error)); } });
   }
   loadSavedMessages(); loadContext(); wireEvents(); setupVoice(); setView('chat'); refreshBootstrap();
 })();

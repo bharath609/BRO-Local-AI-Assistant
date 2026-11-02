@@ -19,15 +19,25 @@ const WHISPER_HOME = process.env.BRO_WHISPER_HOME || path.join(ROOT, 'vendor', '
 const BIN_DIR = process.env.BRO_WHISPER_BIN_DIR || path.join(WHISPER_HOME, 'Release');
 const SERVER_BIN = path.join(BIN_DIR, 'whisper-server.exe');
 const CLI_BIN = path.join(BIN_DIR, 'whisper-cli.exe');
-const MODEL_PATH = process.env.BRO_WHISPER_MODEL || path.join(WHISPER_HOME, 'models', 'ggml-base.en.bin');
+// Prefer a larger English model when one has been downloaded, then base.en,
+// then tiny.en. BRO_WHISPER_MODEL still overrides everything.
+const MODEL_DIR = path.join(WHISPER_HOME, 'models');
+const MODEL_CANDIDATES = ['ggml-small.en.bin', 'ggml-base.en.bin', 'ggml-tiny.en.bin']
+  .map((name) => path.join(MODEL_DIR, name));
+const MODEL_PATH = process.env.BRO_WHISPER_MODEL
+  || MODEL_CANDIDATES.find((candidate) => { try { return fs.existsSync(candidate); } catch { return false; } })
+  || MODEL_CANDIDATES[1];
 const TINY_MODEL_PATH = path.join(WHISPER_HOME, 'models', 'ggml-tiny.en.bin');
 const WAKE_MODEL_PATH = process.env.BRO_WHISPER_WAKE_MODEL
   || (fs.existsSync(TINY_MODEL_PATH) ? TINY_MODEL_PATH : MODEL_PATH);
 const TRANSCRIBE_TIMEOUT_MS = Number(process.env.BRO_WHISPER_TIMEOUT_MS) || 45_000;
 const SERVER_START_TIMEOUT_MS = 30_000;
+// Beam search 5 is noticeably more accurate than greedy decoding for short
+// commands; BRO_WHISPER_BEAM=2 trades some accuracy for speed.
+const BEAM_SIZE = Math.max(1, Math.min(8, Number(process.env.BRO_WHISPER_BEAM) || 5));
 const THREADS = Math.max(2, Math.min(8, os.cpus().length - 1));
 const PROMPT = process.env.BRO_WHISPER_PROMPT
-  || 'BRO voice commands: open Telegram, open WhatsApp, open Chrome, open Discord, open Slack, open Spotify, open Zoom, open VS Code, open Steam, open YouTube, open ChatGPT, open Gmail, open Google Drive, open Downloads, open Calculator, open Notepad, open Task Manager, close Telegram, close Chrome, activate BRO, list projects, search for local AI assistants, run test in my app.';
+  || 'BRO voice commands: open Telegram, open WhatsApp, open Chrome, open YouTube, open Settings, open Downloads, open Calculator, open start menu, open control panel, open device manager, open task manager, refresh, refresh the desktop, play, pause, stop, resume, forward, backward, rewind, next video, previous video, scroll down, scroll up, scroll to the top, scroll to the bottom, page down, page up, volume up, volume down, mute, unmute, fullscreen, take a screenshot, maximize, minimize, restore, close this window, search my Gmail for invoices, type hello world, click first result, create a folder called Reports, lock the pc, shut down the pc, go to sleep.';
 // Deliberately empty: prompting the tiny model with “BRO” makes it hallucinate
 // that phrase over room noise. Text matching does the work instead.
 const WAKE_PROMPT = process.env.BRO_WHISPER_WAKE_PROMPT || '';
@@ -139,7 +149,7 @@ function ensureServer(modelPath) {
       args.push('-nf', '-sns', '-nth', '0.4');
       if (WAKE_PROMPT) args.push('--prompt', WAKE_PROMPT);
     } else {
-      args.push('-bo', '2', '-bs', '2', '--prompt', PROMPT);
+      args.push('-bo', String(BEAM_SIZE), '-bs', String(BEAM_SIZE), '--prompt', PROMPT);
     }
     const child = spawn(SERVER_BIN, args, {
       cwd: BIN_DIR,
@@ -178,6 +188,37 @@ function multipartBody(fields, file) {
 
 const NOISE_ARTIFACTS = new Set(['you', 'thank you', 'thanks', 'bye', 'okay', 'bye bye', 'the', 'a', 'i', 'hmm', 'uh', 'um']);
 
+// Common Whisper spellings of BRO command words. This only rewrites whole
+// words, so phrases such as “forward” still reach the command parser intact
+// even when the recogniser wrote “maximise” or “vedio”.
+function repairTranscript(text) {
+  return text
+    .replace(/\bmaximi[sz]e\b/gi, 'maximize')
+    .replace(/\bmaximi[sz]ed\b/gi, 'maximized')
+    .replace(/\bminimi[sz]e\b/gi, 'minimize')
+    .replace(/\bminimi[sz]ed\b/gi, 'minimized')
+    .replace(/\b(?:vedio|vidio|videio|vidoe)\b/gi, 'video')
+    .replace(/\bwhats\s*app\b/gi, 'WhatsApp')
+    .replace(/\byou\s+tube\b/gi, 'YouTube');
+}
+
+// “Um, open settings” should be treated as “open settings”; Whisper sometimes
+// also keeps a leading “okay” or “and” from the end of the wake word.
+function stripLeadingFiller(text) {
+  let out = String(text || '');
+  for (let guard = 0; guard < 5; guard += 1) {
+    const next = out.replace(/^(?:um+|uh+|hmm+|erm+|ah+|oh+|hey|okay|ok|so|and|like)[,\s]+/i, '').trim();
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+// A pre-rolled command clip can start with the wake word itself.
+function stripLeadingWakeWord(text) {
+  return String(text || '').replace(/^(?:(?:hey|okay|ok)\s+)?(?:there\s+)?(?:bro|bros|broh|brah|brow)[,\s]+/i, '').trim();
+}
+
 function cleanTranscript(value) {
   let text = String(value || '')
     .replace(/\r\n?/g, '\n')
@@ -187,7 +228,16 @@ function cleanTranscript(value) {
     .trim();
   text = text.replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, '').trim();
   if (NOISE_ARTIFACTS.has(text.toLowerCase().replace(/[.!?,]+$/, ''))) return '';
-  return text;
+  return repairTranscript(text);
+}
+
+// Command-only cleanup: wake phrases such as “hey there bro” must survive
+// cleanTranscript untouched, so filler and wake-word removal happens after a
+// clip has already been identified as a command.
+function cleanCommandTranscript(value) {
+  const cleaned = stripLeadingWakeWord(stripLeadingFiller(cleanTranscript(value)));
+  if (NOISE_ARTIFACTS.has(cleaned.toLowerCase().replace(/[.!?,]+$/, ''))) return '';
+  return cleaned;
 }
 
 async function requestServer(modelPath, fields, wavBuffer) {
@@ -236,7 +286,7 @@ function transcribeWithCli(wavBuffer) {
     }
     const file = path.join(os.tmpdir(), `bro-voice-${process.pid}-${Date.now()}.wav`);
     fs.writeFileSync(file, wavBuffer);
-    const args = ['-m', MODEL_PATH, '-f', file, '-nt', '-np', '-t', String(THREADS), '-bo', '2', '-bs', '2', '--prompt', PROMPT];
+    const args = ['-m', MODEL_PATH, '-f', file, '-nt', '-np', '-t', String(THREADS), '-bo', String(BEAM_SIZE), '-bs', String(BEAM_SIZE), '--prompt', PROMPT];
     const child = spawn(CLI_BIN, args, { cwd: BIN_DIR, windowsHide: true, shell: false });
     let stdout = '';
     let stderr = '';
@@ -297,7 +347,7 @@ async function transcribe(wavBuffer) {
     throw Object.assign(new Error(lastError.message), { statusCode: 503 });
   }
   return {
-    text,
+    text: cleanCommandTranscript(text),
     empty: !text,
     engine,
     ms: Date.now() - startedAt,
@@ -327,7 +377,7 @@ function normalizeSpoken(value) {
 function looksLikeCommand(value) {
   const text = String(value || '').trim();
   if (!text) return false;
-  return /^(?:(?:please|bro|could you|can you|would you)\s+)?(?:open|launch|start|visit|go to|close|quit|exit|shut|kill|search|find|google|check|list|show|run|execute|activate|wake up|stop listening|sleep|help|status|what can you do|play|send)\b/i.test(text);
+  return /^(?:(?:please|bro|could you|can you|would you)\s+)?(?:open|launch|start|visit|go to|close|quit|exit|shut|kill|search|find|google|check|list|show|run|execute|activate|wake up|stop listening|sleep|help|status|what can you do|play|pause|resume|stop|forward|backward|rewind|next|previous|skip|maximize|minimize|restore|mute|unmute|volume|fullscreen|captions|scroll|type|write|press|click|tap|save|print|take|send|lock|unlock|switch|refresh|reload|create|make|add|new|delete|remove|trash|rename|copy|cut|paste|undo|redo|empty|clear|record|guardrails?|safety|security|approve|approval|audit|freeze|unfreeze)\b/i.test(text);
 }
 
 function matchWake(value) {
@@ -398,6 +448,8 @@ module.exports = {
   detectWake,
   matchWake,
   looksLikeCommand,
+  cleanTranscript,
+  cleanCommandTranscript,
   shutdown,
   MODEL_PATH,
   WAKE_MODEL_PATH,

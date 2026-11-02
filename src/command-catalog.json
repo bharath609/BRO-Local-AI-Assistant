@@ -29,6 +29,7 @@
     {"id":"wikipedia","phrases":["open wikipedia","go to wikipedia"],"intent":"resource.open","action_type":"open_url","target":"https://www.wikipedia.org","confirmation":"never"},
     {"id":"reddit","phrases":["open reddit","go to reddit"],"intent":"resource.open","action_type":"open_url","target":"https://www.reddit.com","confirmation":"never"},
     {"id":"netflix","phrases":["open netflix","go to netflix"],"intent":"resource.open","action_type":"open_url","target":"https://www.netflix.com","confirmation":"never"},
+    {"id":"prime_video","phrases":["open prime video","open amazon prime video","open amazon prime","go to prime video"],"intent":"resource.open","action_type":"open_url","target":"https://www.primevideo.com","confirmation":"never"},
     {"id":"spotify_web","phrases":["open spotify","open spotify web"],"intent":"resource.open","action_type":"open_url","target":"https://open.spotify.com","confirmation":"never"},
     {"id":"x","phrases":["open x","open twitter"],"intent":"resource.open","action_type":"open_url","target":"https://x.com","confirmation":"never"},
     {"id":"whatsapp_web","phrases":["open whatsapp","open whatsapp web"],"intent":"resource.open","action_type":"open_url","target":"https://web.whatsapp.com","confirmation":"never","sensitive":true},

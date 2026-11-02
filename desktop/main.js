@@ -1,7 +1,19 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, session, shell, screen } = require('electron');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
+
+// Guard against the very common mistake of starting this file with plain
+// `node desktop/main.js`. Under plain Node the Electron APIs are undefined and
+// the app dies with a confusing TypeError. Fail clearly and point at the right
+// launch command instead.
+if (!app || typeof app.requestSingleInstanceLock !== 'function') {
+  console.error('BRO must be started with Electron, not plain Node.');
+  console.error('Run:  npm.cmd run desktop');
+  console.error('Or double-click start-bro-overlay.cmd in the project folder.');
+  process.exit(1);
+}
 
 const HOST = '127.0.0.1';
 const DEFAULT_PORT = 4280;
@@ -14,6 +26,7 @@ let backendProcess;
 let overlayWindow;
 let nativeHotkeyProcess;
 let hotkeyRetryTimer;
+let windowMaximizerProcess;
 let lastHotkeyAt = 0;
 let electronHotkeyRegistered = false;
 const HOTKEY = process.env.BRO_HOTKEY || 'Control+Alt+B';
@@ -115,21 +128,26 @@ async function startBackendIfNeeded() {
 }
 
 function getCompactOverlaySize() {
-  // Return a compact size for the top popup (width: 260px, height: 100px)
-  return { width: 260, height: 100 };
+  // Compact popup pinned to the top-center of the screen, still large enough
+  // to show the full status + transcript + reply without clipping.
+  return { width: 320, height: 158 };
 }
 
 function createOverlayWindow(showWhenReady = !backgroundLaunch) {
-  // Calculate top-center position for a compact popup
+  // Calculate top-center position for a compact popup. The display metrics come
+  // from Electron's `screen` module — never from the window, which does not
+  // exist yet at this point.
   const { width: winWidth, height: winHeight } = getCompactOverlaySize();
-  const screen = overlayWindow.getAvailableScreenRect ? overlayWindow.getAvailableScreenRect() : null;
-  let screenWidth = 1920, screenHeight = 1080;
-  if (screen) {
-    screenWidth = screen.width || screenWidth;
-    screenHeight = screen.height || screenHeight;
+  let area = { x: 0, y: 0, width: 1920, height: 1080 };
+  try {
+    const display = screen.getPrimaryDisplay();
+    area = (display && (display.workArea || display.bounds)) || area;
+  } catch {
+    // Fall back to sane defaults if the display is not queryable yet.
   }
+  const screenWidth = area.width || 1920;
   const x = Math.max(0, Math.min(screenWidth - winWidth, Math.round((screenWidth - winWidth) / 2)));
-  const y = 0; // position at top of screen
+  const y = Math.max(0, area.y || 0); // top of the usable screen area
 
   overlayWindow = new BrowserWindow({
     width: winWidth,
@@ -158,7 +176,7 @@ function createOverlayWindow(showWhenReady = !backgroundLaunch) {
     },
   });
 
-  overlayWindow.setAlwaysOnTop(true, 'floating');
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.webContents.on('console-message', (event, ...args) => {
     const message = event && typeof event.message === 'string' ? event.message : args[1];
     console.log(`BRO renderer: ${message}`);
@@ -176,7 +194,7 @@ function createOverlayWindow(showWhenReady = !backgroundLaunch) {
   overlayWindow.once('ready-to-show', () => {
     if (showWhenReady && overlayWindow && !overlayWindow.isDestroyed()) {
       overlayWindow.show();
-      overlayWindow.setAlwaysOnTop(true, 'floating');
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver');
       if (typeof overlayWindow.moveTop === 'function') overlayWindow.moveTop();
     }
   });
@@ -198,7 +216,7 @@ function activateOverlay() {
   overlayWindow.setOpacity(1);
   if (overlayWindow.isMinimized()) overlayWindow.restore();
   overlayWindow.show();
-  overlayWindow.setAlwaysOnTop(true, 'floating');
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   if (typeof overlayWindow.moveTop === 'function') overlayWindow.moveTop();
   overlayWindow.focus();
   overlayWindow.webContents.focus();
@@ -290,6 +308,45 @@ function stopWindowsHotkey() {
   child.kill();
 }
 
+// Windows restores each app at its previous size. This tiny watcher maximizes
+// new normal windows system-wide (whether BRO opened them or the user did),
+// while leaving dialogs, shell UI, the BRO popup, and already-open windows
+// alone. It runs only while BRO is running.
+function startWindowMaximizer() {
+  if (process.platform !== 'win32' || process.env.BRO_AUTO_MAXIMIZE_WINDOWS === '0') return;
+  if (windowMaximizerProcess) return;
+  const scriptPath = path.join(appRoot, 'scripts', 'maximize-new-windows.ps1');
+  if (!fs.existsSync(scriptPath)) {
+    console.warn('BRO window maximizer script is missing; windows will keep their own size.');
+    return;
+  }
+  windowMaximizerProcess = spawn('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-WindowStyle', 'Hidden', '-File', scriptPath,
+  ], {
+    cwd: appRoot,
+    stdio: 'ignore',
+    windowsHide: true,
+    shell: false,
+  });
+  windowMaximizerProcess.once('error', (error) => {
+    windowMaximizerProcess = null;
+    console.error(`BRO window maximizer could not start: ${error.message}`);
+  });
+  windowMaximizerProcess.once('close', (code) => {
+    windowMaximizerProcess = null;
+    if (code !== 0) console.error(`BRO window maximizer stopped (${code}).`);
+  });
+  console.log('BRO window maximizer: new windows will open maximized');
+}
+
+function stopWindowMaximizer() {
+  if (!windowMaximizerProcess) return;
+  const child = windowMaximizerProcess;
+  windowMaximizerProcess = null;
+  try { child.kill(); } catch { /* already gone */ }
+}
+
 function configureAutoLaunch() {
   if (process.platform !== 'win32' || typeof app.setLoginItemSettings !== 'function') return;
   const entryScript = process.defaultApp ? path.resolve(process.argv[1]) : '';
@@ -328,7 +385,7 @@ ipcMain.on('bro-show-overlay', () => {
   if (!overlayWindow.isVisible()) overlayWindow.show();
   overlayWindow.setIgnoreMouseEvents(false);
   overlayWindow.setOpacity(1);
-  overlayWindow.setAlwaysOnTop(true, 'floating');
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   if (typeof overlayWindow.moveTop === 'function') overlayWindow.moveTop();
   overlayWindow.focus();
 });
@@ -361,6 +418,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   }
   createOverlayWindow();
   registerHotkeys();
+  startWindowMaximizer();
 });
 
 app.on('window-all-closed', () => { if (!backgroundLaunch) app.quit(); });
@@ -371,5 +429,6 @@ app.on('will-quit', () => {
 });
 app.on('before-quit', () => {
   stopWindowsHotkey();
+  stopWindowMaximizer();
   if (backendProcess && !backendProcess.killed) backendProcess.kill();
 });

@@ -7,8 +7,8 @@
   --green: #a9f2c4;
   --green-strong: #6de49b;
   --red: #ef8b88;
-  --widget-width: 260px;
-  --widget-height: 100px;
+  --widget-width: 320px;
+  --widget-height: 158px;
 }
 
 * { box-sizing: border-box; }
@@ -26,6 +26,9 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .brand-copy strong { color: #f1f7f2; font-size: 10px; letter-spacing: .12em; }
 .brand-copy span { margin-top: 1px; color: var(--muted); font-size: 7px; }
 .header-actions { gap: 5px; }
+.guard-badge { padding: 2px 5px; border: 1px solid rgba(169, 242, 196, .45); border-radius: 999px; color: var(--green); font-size: 6px; font-weight: 800; letter-spacing: .08em; }
+.guard-badge.locked { border-color: rgba(239, 139, 136, .65); color: #ffc2bd; }
+.guard-badge.strict { border-color: rgba(255, 209, 142, .65); color: #ffd18e; }
 .connection-dot { width: 5px; height: 5px; border-radius: 50%; background: #d8a766; box-shadow: 0 0 0 3px rgba(216, 167, 102, .1); }
 .connection-dot.online { background: var(--green-strong); box-shadow: 0 0 0 3px rgba(109, 228, 155, .1); }
 .connection-dot.offline { background: var(--red); box-shadow: 0 0 0 3px rgba(239, 139, 136, .1); }

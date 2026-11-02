@@ -121,6 +121,20 @@ test('start menu matching prefers an exact application name', { skip: !isWindows
   assert.equal(found.score, 100);
 });
 
+test('a strong desktop-app match beats a website with the same name', { skip: !isWindows }, async () => {
+  const installed = tools.findInstalledApp('GitHub');
+  if (!installed || installed.score < 85) return;
+  const result = await handleChat({ ...emptyContext, message: 'open github' });
+  assert.equal(result.actions[0].type, 'open_start_menu_app');
+  assert.match(result.reply, /Opening GitHub Desktop/);
+});
+
+test('a weak partial app match never hijacks a known site', async () => {
+  const result = await handleChat({ ...emptyContext, message: 'open link' });
+  assert.equal(result.actions[0].type, 'open_url');
+  assert.equal(result.actions[0].args.url, 'https://www.linkedin.com/');
+});
+
 test('application name normalisation is stable', () => {
   assert.equal(tools.normalizeAppName('Telegram Desktop.lnk'), 'telegram desktop');
   assert.equal(tools.normalizeAppName('VS  Code'), 'vs code');

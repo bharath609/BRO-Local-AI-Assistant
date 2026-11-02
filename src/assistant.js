@@ -1,5 +1,7 @@
-const { validateHttpUrl, normalizeDesktopTarget, resolveWindowsTarget, findInstalledApp } = require('./tools');
+const { validateHttpUrl, normalizeDesktopTarget, resolveWindowsTarget, findInstalledApp, findUserFile, USER_FILE_FOLDERS, findYouTubeVideo } = require('./tools');
 const { providerInfo, chatCompletion } = require('./provider');
+const { matchApplicationSkill } = require('./skills/application-control');
+const { DEFAULT_MODE, normalizeMode } = require('./guardrails');
 const COMMAND_CATALOG = require('./command-catalog.json');
 const APP_CATALOG = require('./app-catalog.json');
 
@@ -119,7 +121,7 @@ function displayNameFor(user) {
 
 function isGreeting(text) {
   const hasGreeting = /\b(?:hey|hi|hello|welcome|good\s+(?:morning|afternoon|evening))\b/i.test(text);
-  const hasActionCue = /https?:\/\/|\b(?:open|visit|go\s+to|run|execute|list|show|search|find|google|status|health|help|activate|wake\s+up)\b/i.test(text);
+  const hasActionCue = /https?:\/\/|\b(?:open|visit|go\s+to|run|execute|list|show|search|find|google|status|health|help|activate|wake\s+up|type|write|dictate|enter|press|click|tap|scroll|save|print)\b/i.test(text);
   return hasGreeting && !hasActionCue;
 }
 
@@ -148,6 +150,217 @@ function stripActionFillers(value) {
     .trim();
 }
 
+// Phrases that point back at whatever BRO opened last: “it”, “that window”,
+// “the video”, “the last tab”. This is what makes follow-ups like
+// “check it once”, “bring that back”, “open that video”, or “minimize it”
+// act on the window BRO itself opened.
+const WINDOW_REFERENCE = (() => {
+  const noun = '(?:window|app|application|program|page|tab|video|site|website|browser|thing)';
+  return `(?:it|that|this|the\\s+${noun}|that\\s+(?:\\w+\\s+)?${noun}|this\\s+(?:\\w+\\s+)?${noun}|the\\s+last\\s+${noun})`;
+})();
+
+function lastTargetLabel(target) {
+  if (!target) return 'the window';
+  if (target.kind === 'site') return siteDisplayName(target.url);
+  if (target.kind === 'terminal') return 'the terminal';
+  return target.label || target.id || 'the window';
+}
+
+// A friendly, correctly-capitalised name for a URL, so replies say “YouTube”
+// rather than the shortest spoken alias (“u tube”) or a bare host name.
+function siteDisplayName(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+    const known = {
+      'youtube.com': 'YouTube', 'm.youtube.com': 'YouTube', 'mail.google.com': 'Gmail',
+      'google.com': 'Google', 'github.com': 'GitHub', 'chatgpt.com': 'ChatGPT',
+      'chat.openai.com': 'ChatGPT', 'linkedin.com': 'LinkedIn', 'x.com': 'X',
+      'twitter.com': 'Twitter', 'facebook.com': 'Facebook', 'instagram.com': 'Instagram',
+      'amazon.com': 'Amazon', 'amazon.in': 'Amazon', 'netflix.com': 'Netflix',
+      'spotify.com': 'Spotify', 'web.whatsapp.com': 'WhatsApp', 'reddit.com': 'Reddit',
+      'stackoverflow.com': 'Stack Overflow',
+    };
+    if (known[host]) return known[host];
+    const parts = host.split('.');
+    const base = parts.length > 1 ? parts[parts.length - 2] : host;
+    return base.charAt(0).toUpperCase() + base.slice(1);
+  } catch {
+    return siteLabel(url);
+  }
+}
+
+function windowControlIntent(commandText, lastTarget) {
+  if (!lastTarget) return null;
+  const cleaned = String(commandText || '')
+    .toLowerCase()
+    .replace(/[.!?]+$/, '')
+    .replace(/\b(?:please|now|right\s+now|for\s+me|once|again|real\s+quick|thanks|thank\s+you)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const ref = WINDOW_REFERENCE;
+  const rules = [
+    // “check it once”, “show me that”, “bring the window up”, “open that video”
+    { mode: 'focus', re: new RegExp(`^(?:focus|show(?:\\s+me)?|switch\\s+to|bring(?:\\s+back|\\s+up|\\s+forward)?|come\\s+back\\s+to|go\\s+back\\s+to|open|check(?:\\s+on)?|look\\s+at|see|peek\\s+at|view|display|restore|unminimize|play|resume)\\s+(?:on\\s+|at\\s+)?${ref}(?:\\s+(?:out|up|back))?$`) },
+    { mode: 'focus', re: new RegExp(`^(?:bring|get|put)\\s+${ref}\\s+back$`) },
+    // “minimize it”, “hide that window”, “put it away”
+    { mode: 'minimize', re: new RegExp(`^(?:minimize|hide|shrink|collapse|put\\s+away|put\\s+down|tuck\\s+away)\\s+${ref}$`) },
+    // “maximize it”, “make it full screen”, “expand the window”
+    { mode: 'maximize', re: new RegExp(`^(?:maximize|expand|enlarge|full\\s*screen|go\\s+full\\s*screen)\\s+${ref}$`) },
+    { mode: 'maximize', re: new RegExp(`^make\\s+${ref}\\s+(?:full\\s*screen|bigger|maximized|larger)$`) },
+  ];
+  for (const rule of rules) {
+    if (!rule.re.test(cleaned)) continue;
+    const label = lastTargetLabel(lastTarget);
+    const verb = rule.mode === 'focus' ? 'Bring' : rule.mode === 'minimize' ? 'Minimize' : 'Maximize';
+    const replies = {
+      focus: `Bringing ${label} back to the front.`,
+      minimize: `Minimizing ${label}.`,
+      maximize: `Maximizing ${label}.`,
+    };
+    return {
+      action: {
+        id: `${rule.mode}_window`,
+        type: `${rule.mode}_window`,
+        args: { target: { label, kind: lastTarget.kind } },
+        label: `${verb} ${label}`,
+      },
+      reply: replies[rule.mode],
+    };
+  }
+  return null;
+}
+
+
+// Known sites that accept a search query, so “open YouTube” followed by
+// “play lo-fi beats” stays inside YouTube instead of guessing at an app.
+const SITE_SEARCH_TEMPLATES = [
+  { host: /(^|\.)youtube\.com$/, name: 'YouTube', play: true, build: (q) => `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}` },
+  { host: /(^|\.)google\.[a-z.]+$/, name: 'Google', build: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}` },
+  { host: /(^|\.)github\.com$/, name: 'GitHub', build: (q) => `https://github.com/search?q=${encodeURIComponent(q)}` },
+  { host: /(^|\.)amazon\.[a-z.]+$/, name: 'Amazon', build: (q) => `https://www.amazon.com/s?k=${encodeURIComponent(q)}` },
+  { host: /(^|\.)netflix\.com$/, name: 'Netflix', build: (q) => `https://www.netflix.com/search?q=${encodeURIComponent(q)}` },
+  { host: /(^|\.)primevideo\.com$/, name: 'Prime Video', build: (q) => `https://www.primevideo.com/search/ref=atv_nb_sr?phrase=${encodeURIComponent(q)}` },
+  { host: /(^|\.)spotify\.com$/, name: 'Spotify', build: (q) => `https://open.spotify.com/search/${encodeURIComponent(q)}` },
+  { host: /(^|\.)reddit\.com$/, name: 'Reddit', build: (q) => `https://www.reddit.com/search/?q=${encodeURIComponent(q)}` },
+  { host: /(^|\.)wikipedia\.org$/, name: 'Wikipedia', build: (q) => `https://en.wikipedia.org/w/index.php?search=${encodeURIComponent(q)}` },
+];
+
+function isKnownSite(value) {
+  try { return Boolean(resolveSiteUrl(value)); } catch { return false; }
+}
+
+// “open YouTube” then “play <video name>” → search that site. Only runs when
+// the previous target was a website that supports search and the phrase is not
+// already a real app, folder, project, or site.
+function siteSearchIntent(commandText, lastTarget, projects) {
+  if (!lastTarget || lastTarget.kind !== 'site') return null;
+  const match = commandText.match(/^(open|play|watch|find|look\s+(?:for|up)|put\s+on|show\s+me)\s+(.+)$/i);
+  if (!match) return null;
+  const query = stripActionFillers(cleanTarget(match[2])).replace(/\s+/g, ' ').trim();
+  if (!query || query.length < 2 || query.length > 120) return null;
+  if (isBareMediaReference(query)) return null;
+  if (/\.[a-z0-9]{1,6}$/i.test(query)) return null; // a file name, not a video
+  if (/\b(?:file|document|pdf|resume|cv|spreadsheet|presentation)\b/i.test(query)) return null; // a local file request
+  if (normalizeDesktopTarget(query) || resolveAppEntry(query) || isKnownSite(query) || projectByName(projects, query)) return null;
+  let host = '';
+  try { host = new URL(lastTarget.url).hostname.toLowerCase(); } catch { return null; }
+  const template = SITE_SEARCH_TEMPLATES.find((item) => item.host.test(host));
+  if (!template) return null;
+  // “play”, “watch”, and “open <name>” actually play the top YouTube result;
+  // “find”/“look for” stay on the results page.
+  const wantsPlayback = /^(?:open|play|watch|put\s+on|show\s+me)$/i.test(match[1]);
+  return { url: template.build(query), site: template.name, query, play: Boolean(template.play && wantsPlayback) };
+}
+
+// Plays the top YouTube result for a query. Falls back to the results page when
+// the lookup fails, so the command never leaves the user with nothing.
+async function playOnYouTube(query, site = 'YouTube') {
+  const video = await findYouTubeVideo(query);
+  if (video && video.url) {
+    return {
+      action: {
+        id: 'open_url',
+        type: 'open_url',
+        args: { url: `${video.url}&autoplay=1` },
+        label: video.title ? `Play ${video.title}` : `Play ${query}`,
+      },
+      reply: video.title ? `Playing “${video.title}” on ${site}.` : `Playing the top ${site} result for “${query}”.`,
+    };
+  }
+  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+  return {
+    action: { id: 'open_url', type: 'open_url', args: { url }, label: `Search ${site} for ${query}` },
+    reply: `I could not start the first result automatically, so I am opening ${site} results for “${query}”.`,
+  };
+}
+
+// “play that video”, “watch the song” — these point at the open window, not at
+// a search query.
+function isBareMediaReference(value) {
+  return /^(?:(?:it|that|this|the|my|the\s+last|that\s+same)\s+)?(?:video|song|movie|music|clip|track|thing)$/i.test(String(value || '').trim())
+    || /^(?:it|that|this|the\s+last)$/i.test(String(value || '').trim());
+}
+
+// Document, media, and archive extensions that are clearly files, never sites.
+// “open report.pdf” must find the file, not visit https://report.pdf.
+const FILE_EXTENSIONS = /\.(?:pdf|docx?|xlsx?|pptx?|txt|rtf|md|csv|json|xml|html?|png|jpe?g|gif|webp|bmp|svg|mp4|mkv|mov|avi|webm|mp3|wav|flac|m4a|zip|rar|7z|exe|msi|iso|apk)$/i;
+
+// “open report.pdf”, “find my resume”, or a file request while a folder is
+// open. The query is matched against the user's own folders only.
+function fileRequestIntent(commandText, lastTarget, projects) {
+  const match = commandText.match(/^(?:open|find|locate|show(?:\s+me)?)\s+(?:the\s+|my\s+)?(?:file\s+|document\s+)?(?:named\s+|called\s+)?(.+)$/i);
+  if (!match) return null;
+  let candidate = stripActionFillers(cleanTarget(match[1])).replace(/\s+/g, ' ').trim();
+  let folder = '';
+  const where = candidate.match(/\s+in\s+(?:the\s+)?(downloads|documents|desktop|pictures|videos|music)\s*$/i);
+  if (where) {
+    folder = where[1].charAt(0).toUpperCase() + where[1].slice(1).toLowerCase();
+    candidate = candidate.slice(0, where.index).trim();
+  }
+  candidate = candidate.replace(/\s+(?:file|document)\s*$/i, '').trim();
+  if (!candidate || candidate.length < 2 || candidate.length > 120) return null;
+
+  const hasFileExtension = FILE_EXTENSIONS.test(candidate);
+  const looksLikeFile = hasFileExtension
+    || /\b(?:file|document|pdf|photo|picture|video|song|spreadsheet|presentation|resume|cv)\b/i.test(commandText);
+  const folderContext = Boolean(lastTarget && lastTarget.kind === 'desktop');
+  if (!looksLikeFile && !folderContext && !folder) return null;
+
+  // A real file extension wins over every app/site guess.
+  if (hasFileExtension) {
+    if (!folder && lastTarget && lastTarget.kind === 'desktop') {
+      const byKey = { downloads: 'Downloads', documents: 'Documents', desktop: 'Desktop', pictures: 'Pictures' };
+      folder = byKey[lastTarget.key] || '';
+    }
+    return { query: candidate, folder };
+  }
+
+  // Never hijack a real app, folder, site, or project name.
+  if (normalizeDesktopTarget(candidate) || resolveAppEntry(candidate) || isKnownSite(candidate)) return null;
+  if (projectByName(projects, candidate)) return null;
+  const installed = findInstalledApp(candidate);
+  if (installed && installed.score >= 90) return null;
+
+  if (!folder && lastTarget && lastTarget.kind === 'desktop') {
+    const byKey = { downloads: 'Downloads', documents: 'Documents', desktop: 'Desktop', pictures: 'Pictures' };
+    folder = byKey[lastTarget.key] || '';
+  }
+  return { query: candidate, folder };
+}
+
+// Where a found file lives, in user-friendly terms: “Desktop” rather than the
+// full path, and “dist” only when it is not inside one of the user folders.
+function describeUserFolder(dir) {
+  const normalized = String(dir || '').toLowerCase();
+  if (!normalized) return '';
+  const order = ['Desktop', 'Downloads', 'Documents', 'Pictures', 'Videos', 'Music'];
+  for (const folder of order) {
+    const lower = folder.toLowerCase();
+    if (normalized.endsWith(`\\${lower}`) || normalized.includes(`\\${lower}\\`)) return folder;
+  }
+  return String(dir || '').split(/[\\/]/).filter(Boolean).pop() || '';
+}
+
 function canonicalContextTarget(target, projects) {
   if (!target || typeof target !== 'object') return null;
   const kind = typeof target.kind === 'string' ? target.kind.toLowerCase() : (typeof target.type === 'string' ? target.type.toLowerCase() : '');
@@ -170,6 +383,11 @@ function canonicalContextTarget(target, projects) {
     return entry ? { kind: 'app', id: entry.id, label: entry.label } : null;
   }
   if (kind === 'terminal') return { kind: 'terminal', label: 'terminal' };
+  if (kind === 'file') {
+    const filePath = String(target.path || target.key || '');
+    if (!filePath) return null;
+    return { kind: 'file', path: filePath, label: String(target.label || target.name || filePath.split(/[\\/]/).filter(Boolean).pop() || 'file') };
+  }
   if (kind === 'project') {
     const project = projects.find((item) => item.id === target.projectId);
     return project ? { kind: 'project', projectId: project.id, label: project.name } : null;
@@ -191,6 +409,9 @@ function contextForAction(action, projects) {
     return { kind: 'app', id: action.args.name, label: action.args.name };
   }
   if (action.type === 'open_terminal') return { kind: 'terminal', label: 'terminal' };
+  if (action.type === 'open_user_file' && action.args) {
+    return { kind: 'file', path: action.args.path, label: action.args.name || String(action.args.path || '').split(/[\\/]/).filter(Boolean).pop() || 'file' };
+  }
   if (action.type === 'open_project') {
     const project = projects.find((item) => item.id === action.args.projectId);
     return project ? { kind: 'project', projectId: project.id, label: project.name } : null;
@@ -209,6 +430,7 @@ function contextAction(target, projects) {
       : { id: 'open_start_menu_app', type: 'open_start_menu_app', args: { name: target.id }, label: `Open ${target.label}` };
   }
   if (target.kind === 'terminal') return { id: 'open_terminal', type: 'open_terminal', args: {}, label: 'Open a terminal' };
+  if (target.kind === 'file') return { id: 'open_user_file', type: 'open_user_file', args: { path: target.path, name: target.label }, label: `Open ${target.label}` };
   if (target.kind === 'project') {
     const project = projects.find((item) => item.id === target.projectId);
     return project ? { id: 'open_project', type: 'open_project', args: { projectId: project.id }, label: `Open ${project.name}` } : null;
@@ -216,12 +438,66 @@ function contextAction(target, projects) {
   return null;
 }
 
-function baseResult(settings, context) { return { actions: [], provider: providerInfo(settings), context: { lastTarget: context } }; }
+function baseResult(settings, context, extra = {}) {
+  const preserved = {};
+  for (const key of ['mediaState', 'pending', 'lastFileQuery']) {
+    if (extra && extra[key]) preserved[key] = extra[key];
+  }
+  return { actions: [], provider: providerInfo(settings), context: { ...preserved, lastTarget: context } };
+}
 
-async function handleChat({ message, history = [], projects = [], settings, user, context, requestContext, lastTarget: directLastTarget }) {
+// Only these actions may be replayed from a stored spoken confirmation. The
+// rest of the pending object comes from the browser's localStorage, so it is
+// never trusted as-is.
+const CONFIRMABLE_ACTIONS = new Set(['system_power', 'empty_recycle_bin', 'recycle_file']);
+
+function confirmedAction(pending) {
+  const action = pending && pending.action;
+  if (!action || typeof action !== 'object' || !CONFIRMABLE_ACTIONS.has(action.type)) return null;
+  const args = action.args || {};
+  if (action.type === 'system_power') {
+    if (args.mode !== 'shutdown' && args.mode !== 'restart') return null;
+    return { id: 'system_power', type: 'system_power', args: { mode: args.mode }, confirmedByUser: true, label: args.mode === 'restart' ? 'Restart the PC' : 'Shut down the PC' };
+  }
+  if (action.type === 'empty_recycle_bin') {
+    return { id: 'empty_recycle_bin', type: 'empty_recycle_bin', args: {}, confirmedByUser: true, label: 'Empty the Recycle Bin' };
+  }
+  if (typeof args.path !== 'string' || !args.path) return null;
+  return { id: 'recycle_file', type: 'recycle_file', args: { path: args.path }, confirmedByUser: true, label: action.label || 'Move the file to the Recycle Bin' };
+}
+
+// Plain-language explanation of each guardrail level, used by the spoken
+// status reply and by the full app.
+const GUARDRAIL_SUMMARY = {
+  strict: 'Strict: every action that touches your PC waits for your yes.',
+  guarded: 'Guarded: opening, typing, playback, and scrolling run; file changes, closing apps, and power actions wait for your yes.',
+  trusted: 'Trusted: only destructive actions wait for your yes.',
+};
+
+function guardrailModeReply(mode) {
+  return `Guardrails are now ${mode}. ${GUARDRAIL_SUMMARY[mode] || GUARDRAIL_SUMMARY[DEFAULT_MODE]}`;
+}
+
+function guardrailStatusReply(state, pendingCount) {
+  const mode = normalizeMode(state && state.mode) || DEFAULT_MODE;
+  const locked = Boolean(state && state.locked);
+  const waiting = pendingCount > 0 ? ` ${pendingCount} action${pendingCount === 1 ? ' is' : 's are'} waiting for your approval.` : '';
+  return `Guardrails: ${mode}${locked ? ', master lock ON' : ''}. ${GUARDRAIL_SUMMARY[mode]}${locked ? ' Nothing that changes your PC will run until you say “unlock controls”.' : ''}${waiting}`;
+}
+
+function auditReply(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return 'No actions have been recorded yet.';
+  const lines = entries.slice(0, 5).map((entry) => {
+    const time = entry.at ? new Date(entry.at).toLocaleTimeString() : '';
+    return `${time} ${entry.decision}: ${entry.label}`;
+  });
+  return `Here is the recent activity log.\n${lines.join('\n')}`;
+}
+
+async function handleChat({ message, history = [], projects = [], settings, user, context, requestContext, lastTarget: directLastTarget, guardrails, audit = [], pendingApprovals = 0 }) {
   const incomingContext = context || requestContext || (directLastTarget ? { lastTarget: directLastTarget } : {});
   const lastTarget = canonicalContextTarget(incomingContext.lastTarget, projects);
-  const result = baseResult(settings, lastTarget);
+  const result = baseResult(settings, lastTarget, incomingContext);
   if (typeof message !== 'string' || !message.trim()) {
     result.reply = 'Tell me what you would like to do. Try “list projects” or “open https://example.com”.';
     return result;
@@ -246,8 +522,64 @@ async function handleChat({ message, history = [], projects = [], settings, user
     return result;
   }
 
+  // A previous sentence asked for something risky (shut down, empty the
+  // Recycle Bin, delete a file). It only runs after a clear spoken "yes".
+  if (result.context.pending) {
+    if (/^(?:yes|yeah|yep|yup|sure|okay|ok|do\s+it|go\s+ahead|confirm(?:ed)?|proceed)[.!]?$/i.test(commandText)) {
+      const action = confirmedAction(result.context.pending);
+      delete result.context.pending;
+      if (!action) {
+        result.reply = 'That confirmation is no longer valid. Please ask me again.';
+        return result;
+      }
+      result.actions.push(action);
+      result.reply = `${action.type === 'system_power' ? 'Confirmed.' : 'Confirmed.'} ${action.label}.`;
+      return result;
+    }
+    if (/^(?:no|nope|nah|cancel|stop|abort|never\s*mind|do\s+not|don'?t)[.!]?$/i.test(commandText)) {
+      delete result.context.pending;
+      result.reply = 'Okay, I cancelled that.';
+      return result;
+    }
+    // Any other command replaces the pending request.
+    delete result.context.pending;
+  }
+
+  // Guardrail controls belong to the user only. These are handled before any
+  // ordinary action so a gate can never be bypassed by a sentence.
+  const guardrailMode = commandText.match(/^(?:set\s+|switch\s+|change\s+|use\s+)?(?:guardrails?|guard\s*rails?|safety|security)\s+(?:to\s+|mode\s+)?(strict|guarded|trusted)$/i);
+  if (guardrailMode) {
+    const mode = guardrailMode[1].toLowerCase();
+    result.actions.push({ id: 'set_guardrails', type: 'set_guardrails', args: { mode }, label: `Set guardrails to ${mode}` });
+    result.reply = guardrailModeReply(mode);
+    return result;
+  }
+  if (/^(?:lock|freeze|disable|pause|stop)\s+(?:all\s+)?(?:the\s+)?(?:controls?|commands?|actions?|everything|bro|pc)$/i.test(commandText)
+    || /^(?:master\s+lock|lock\s+everything|lock\s+it\s+down)$/i.test(commandText)) {
+    result.actions.push({ id: 'lock_controls', type: 'lock_controls', args: {}, label: 'Turn the master lock on' });
+    result.reply = 'Master lock is on. Nothing that changes your PC will run until you say “unlock controls”.';
+    return result;
+  }
+  if (/^(?:unlock|enable|resume|release|unfreeze)\s+(?:all\s+)?(?:the\s+)?(?:controls?|commands?|actions?|everything|bro|pc)$/i.test(commandText)
+    || /^(?:master\s+unlock|unlock\s+it)$/i.test(commandText)) {
+    result.actions.push({ id: 'unlock_controls', type: 'unlock_controls', args: {}, label: 'Turn the master lock off' });
+    result.reply = 'Master lock is off. Guardrails are back on.';
+    return result;
+  }
+  if (/^(?:guardrails?|safety|security)\s+(?:status|state|settings?)\??$/i.test(commandText)
+    || /^what(?:'?s| is) (?:my )?(?:guardrails?|safety|security)(?: status)?\??$/i.test(commandText)
+    || /^(?:am i|are we) locked\??$/i.test(commandText)) {
+    result.reply = guardrailStatusReply(guardrails, pendingApprovals);
+    return result;
+  }
+  if (/^(?:show|read|open|list)\s+(?:me\s+)?(?:the\s+)?(?:audit|activity|action)\s+(?:log|history|trail)$/i.test(commandText)
+    || /^what (?:did you do|have you done)(?: last)?\??$/i.test(commandText)) {
+    result.reply = auditReply(audit);
+    return result;
+  }
+
   if (/^(help|what can you do|commands?)\??$/i.test(commandText)) {
-    result.reply = 'I can greet you, activate the BRO voice popup, open any app installed on this PC (“open Telegram”, “open Chrome”), open known sites (“open Gmail”, “open YouTube”), open Windows folders and tools (“open Downloads”, “open Task Manager”), search the web or YouTube, open a terminal, list or open registered projects, and run a named project profile after approval. I can also close things: “close Telegram”, “close Gmail” (that tab), “close this window”, “close the tab in front”, “close that” (whatever I opened last), “close everything” (what I opened) or “close all windows”. Browser playback and sending messages remain unchanged until the matching browser-control session is connected and approved.';
+    result.reply = 'Everything I do is under your guardrails. Say “guardrails status”, “guardrails strict”, “guardrails guarded”, “guardrails trusted”, “lock everything”, “unlock controls”, or “show the audit log”. I can greet you, activate the BRO voice popup, open any app installed on this PC ("open Telegram", "open Chrome"), open known sites ("open Gmail", "open YouTube"), open Windows folders and tools ("open Downloads", "open Task Manager"), search the web or YouTube, open a terminal, list or open registered projects, and run a named project profile after approval. Desktop apps are checked before websites; say "open GitHub website" if you want the page instead of the app. Opened windows come to the front and are enlarged to fill the screen. After I open a site, name a video or search and I stay on that site: "play lo-fi beats" plays the top YouTube video, "find lo-fi beats" shows results. I can also find and open your files by name ("open report.pdf", "open my resume"). I control the window I opened last: "check it once", "bring that back", "open that video", "minimize it", "maximize it". I can close things: "close Telegram", "close Gmail" (that tab), "close this window", "close the tab in front", "close that", "close everything" or "close all windows". I also control playback and apps: "pause", "stop", "play", "forward" or "backward" (10 seconds each), "skip forward 30 seconds", "play the next video", "volume up", "mute", "captions on", "fullscreen", "next tab", "zoom in", "scroll down" or "scroll up" (works in Gmail, YouTube, and other long lists), "type hello", "click first result", "save", "print", Gmail and Outlook searches, WhatsApp chats, Google Drive, Office and VS Code shortcuts, "take a screenshot", Windows Settings pages, "create a folder called Reports", and power actions. I also have local PC controls: "open start menu", "show task view", "open quick settings", "open run dialog", "show clipboard", "refresh", "refresh the desktop", "switch window", "open control panel", "open device manager", "open programs and features", "open network connections", "open system information", "open event viewer", "open disk management", "open services", "open printers", "open recycle bin", and "open this pc". Shutdown, restart, deleting a file, and emptying the Recycle Bin ask for a spoken "yes" first, and I never send messages or share your screen automatically. Say "sleep" or "go to sleep mode" and I disappear until you say "BRO" or press Ctrl + Alt + B.';
     return result;
   }
   if (/^(status|health|provider status)\??$/i.test(commandText)) {
@@ -264,6 +596,26 @@ async function handleChat({ message, history = [], projects = [], settings, user
     result.actions.push(action);
     result.context.lastTarget = contextForAction(action, projects);
     result.reply = 'Opening a terminal for you.';
+    return result;
+  }
+
+  // Application-control skill: playback, browsers, mail, office apps, settings,
+  // screenshots, keyboard, scrolling, clicking, folders, and power actions.
+  const skill = matchApplicationSkill(commandText, {
+    lastTarget,
+    mediaState: result.context.mediaState,
+    lastFileQuery: result.context.lastFileQuery,
+  });
+  if (skill) {
+    if (skill.action) {
+      result.actions.push(skill.action);
+      if (skill.action.type === 'open_url' || skill.action.type === 'open_desktop_target') {
+        result.context.lastTarget = contextForAction(skill.action, projects) || lastTarget;
+      }
+    }
+    if (skill.reply) result.reply = skill.reply;
+    if (skill.mediaState) result.context.mediaState = skill.mediaState;
+    if (skill.pending) result.context.pending = skill.pending;
     return result;
   }
 
@@ -370,6 +722,20 @@ async function handleChat({ message, history = [], projects = [], settings, user
         result.reply = `Closing the ${label} tab.`;
         return result;
       }
+      if (lastTarget.kind === 'file') {
+        result.actions.push({ id: 'close_window', type: 'close_window', args: { tab: false }, label: `Close ${lastTarget.label}` });
+        result.closeTargets = [lastTarget.label];
+        result.reply = `Closing “${lastTarget.label}”.`;
+        return result;
+      }
+      if (lastTarget.kind === 'desktop') {
+        // Folders and Windows tools (Notepad, Calculator, Downloads, …) are
+        // closed by their window title, which is what the user just opened.
+        result.actions.push({ id: 'close_named_app', type: 'close_named_app', args: { name: lastTarget.label }, label: `Close ${lastTarget.label}` });
+        result.closeTargets = [lastTarget.label];
+        result.reply = `Closing ${lastTarget.label}.`;
+        return result;
+      }
       result.reply = 'The last thing I opened was not an app or a web page, so there is nothing for me to close.';
       return result;
     }
@@ -428,6 +794,69 @@ async function handleChat({ message, history = [], projects = [], settings, user
     return result;
   }
 
+  // Follow-ups that point back at the window BRO opened last, e.g.
+  // “check it once”, “bring that back”, “open that video”, “minimize it”.
+  const control = windowControlIntent(commandText, lastTarget);
+  if (control) {
+    result.actions.push(control.action);
+    result.context.lastTarget = lastTarget;
+    result.reply = control.reply;
+    return result;
+  }
+
+  // “open YouTube” → “play lo-fi beats”: keep the new request inside the site
+  // BRO opened, instead of looking for an app called “lo-fi beats”.
+  const siteSearch = siteSearchIntent(commandText, lastTarget, projects);
+  if (siteSearch) {
+    if (siteSearch.play) {
+      const played = await playOnYouTube(siteSearch.query, siteSearch.site);
+      result.actions.push(played.action);
+      result.context.lastTarget = contextForAction(played.action, projects);
+      if (String(played.action.args && played.action.args.url || '').includes('watch?v=')) result.context.mediaState = 'playing';
+      result.reply = played.reply;
+      return result;
+    }
+    const action = { id: 'open_url', type: 'open_url', args: { url: siteSearch.url }, label: `Search ${siteSearch.site} for ${siteSearch.query}` };
+    result.actions.push(action);
+    result.context.lastTarget = { kind: 'site', url: siteSearch.url };
+    result.reply = `Searching ${siteSearch.site} for “${siteSearch.query}”.`;
+    return result;
+  }
+
+  // “play <video name>”, or “play <video name> on YouTube”, even when YouTube
+  // is not open yet. This plays the top result instead of searching.
+  const playRequest = commandText.match(/^(?:play|watch|put\s+on)\s+(?:the\s+)?(?:video\s+)?(.+?)(?:\s+(?:on|in)\s+youtube)?$/i);
+  if (playRequest) {
+    const query = stripActionFillers(cleanTarget(playRequest[1])).replace(/\s+/g, ' ').trim();
+    if (query && query.length >= 2 && query.length <= 120 && !isBareMediaReference(query)
+      && !normalizeDesktopTarget(query) && !resolveAppEntry(query) && !isKnownSite(query) && !projectByName(projects, query)) {
+      const played = await playOnYouTube(query, 'YouTube');
+      result.actions.push(played.action);
+      result.context.lastTarget = contextForAction(played.action, projects);
+      if (String(played.action.args && played.action.args.url || '').includes('watch?v=')) result.context.mediaState = 'playing';
+      result.reply = played.reply;
+      return result;
+    }
+  }
+
+  // “open report.pdf”, or “open my resume” right after opening a folder.
+  // The file is looked up in the user's own folders and opened directly.
+  const fileRequest = fileRequestIntent(commandText, lastTarget, projects);
+  if (fileRequest) {
+    result.context.lastFileQuery = fileRequest.query;
+    const file = findUserFile(fileRequest.query, { folder: fileRequest.folder });
+    if (file) {
+      const action = { id: 'open_user_file', type: 'open_user_file', args: { path: file.path, name: file.name }, label: `Open ${file.name}` };
+      result.actions.push(action);
+      result.context.lastTarget = contextForAction(action, projects);
+      const where = describeUserFolder(file.dir);
+      result.reply = `Opening “${file.name}”${where ? ` from ${where}` : ''}.`;
+      return result;
+    }
+    result.reply = `I could not find a file called “${fileRequest.query}”. I looked in ${USER_FILE_FOLDERS.join(', ')}.`;
+    return result;
+  }
+
   const openRequest = commandText.match(/^(?:open(?:\s+up)?|launch|start|visit|go\s+to|take\s+me\s+to|bring\s+up|pull\s+up|fire\s+up|boot\s+up|load|show\s+me|check(?:\s+my)?)\s+(?:the\s+)?(?:url|site|website|web\s+site|app|application|page)?\s*(.+)$/i);
   if (openRequest) {
     const rawTarget = openRequest[1].trim();
@@ -461,34 +890,18 @@ async function handleChat({ message, history = [], projects = [], settings, user
       }
     }
 
-    // 2. Any app installed on this PC with an exact name. A local application
-    //    always beats a website when both could match.
+    // 2. Any app installed on this PC. A strong desktop-app match wins over a
+    //    website with the same name; a weak partial match (for example “link”
+    //    matching Phone Link) never hijacks a known site.
     const installed = !wantsWebsite && candidate.length >= 2 && candidate.length <= 60 ? findInstalledApp(candidate) : null;
-    if (installed && installed.score === 100) {
-      const action = { id: 'open_start_menu_app', type: 'open_start_menu_app', args: { name: candidate }, label: `Open ${installed.name}` };
-      result.actions.push(action);
-      result.context.lastTarget = contextForAction(action, projects);
-      result.reply = `Opening ${installed.name}.`;
-      return result;
-    }
-
-    // 3. A known website.
+    let knownUrl = null;
     try {
-      const url = resolveSiteUrl(candidate) || (appEntry && appEntry.url) || null;
-      if (url) {
-        const action = { id: 'open_url', type: 'open_url', args: { url }, label: `Open ${url}` };
-        result.actions.push(action);
-        result.context.lastTarget = contextForAction(action, projects);
-        result.reply = `Opening ${url}.`;
-        return result;
-      }
+      knownUrl = resolveSiteUrl(candidate) || (appEntry && appEntry.url) || null;
     } catch (error) {
       result.reply = error.message;
       return result;
     }
-
-    // 4. A near match in the installed apps, when no website claimed the name.
-    if (installed && installed.score >= 70) {
+    if (installed && (installed.score >= 85 || !knownUrl)) {
       const action = { id: 'open_start_menu_app', type: 'open_start_menu_app', args: { name: candidate }, label: `Open ${installed.name}` };
       result.actions.push(action);
       result.context.lastTarget = contextForAction(action, projects);
@@ -496,7 +909,17 @@ async function handleChat({ message, history = [], projects = [], settings, user
       return result;
     }
 
-    // 5. A registered project folder.
+    // 3. A known website, only when no strong desktop app matched.
+    if (knownUrl) {
+      const action = { id: 'open_url', type: 'open_url', args: { url: knownUrl }, label: `Open ${knownUrl}` };
+      result.actions.push(action);
+      result.context.lastTarget = contextForAction(action, projects);
+      const typedDomain = /^https?:\/\//i.test(candidate) || /^[a-z0-9.-]+\.[a-z]{2,}(?:[/:?#]|$)/i.test(candidate);
+      result.reply = typedDomain ? `Opening ${knownUrl}.` : `Opening ${siteDisplayName(knownUrl)}.`;
+      return result;
+    }
+
+    // 4. A registered project folder.
     const project = projectByName(projects, candidate.replace(/^project\s+/i, '').trim());
     if (project) {
       const action = { id: 'open_project', type: 'open_project', args: { projectId: project.id }, label: `Open ${project.name}` };
@@ -545,7 +968,7 @@ async function handleChat({ message, history = [], projects = [], settings, user
 
   if (result.provider.configured) {
     const projectSummary = projects.length ? projects.map((project) => `${project.name}: ${Object.keys(project.commands || {}).join(', ') || 'no profiles'}`).join('; ') : 'none';
-    const system = `You are BRO, a warm but concise local personal assistant for ${userName}. Registered projects: ${projectSummary}. You may discuss safe actions only: open http(s) URLs, open allowlisted Windows targets by name, list projects, open a registered project, or request a named profile run. Never invent shell commands or desktop paths; profile runs require explicit frontend approval. Do not claim to have taken an action unless the local app reports it completed. Casual greetings should receive a friendly greeting, not an action.`;
+    const system = `You are BRO, a warm but concise local personal assistant for ${userName}. Registered projects: ${projectSummary}. You may discuss safe actions only: open http(s) URLs, open allowlisted Windows targets by name, list projects, open a registered project, or request a named profile run. Never invent shell commands or desktop paths; profile runs require explicit frontend approval. Do not claim to have taken an action unless the local app reports it completed. You cannot execute, approve, or bypass any action yourself — approval belongs to the user alone, and every action is checked against their guardrails before it runs. If the user asks you to do something, describe what you would do and let the app ask them to approve it. Casual greetings should receive a friendly greeting, not an action.`;
     const completion = await chatCompletion(settings, [{ role: 'system', content: system }, ...history.slice(-10), { role: 'user', content: text }]);
     if (completion.ok) { result.reply = completion.reply; return result; }
     result.reply = completion.reason === 'provider timed out'

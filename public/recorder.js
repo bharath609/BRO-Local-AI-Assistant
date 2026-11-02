@@ -14,7 +14,7 @@
   const DEFAULT_MAX_MS = 15000;
   const MIN_SPEECH_MS = 300;
   const CALIBRATION_MS = 350;
-  const TRIM_PADDING_MS = 160;
+  const TRIM_PADDING_MS = 200;
   const WATCH_GAP_MS = 80;
 
   function mergeChunks(chunks, length) {
@@ -43,7 +43,9 @@
   }
 
   function trimSilence(samples, sampleRate) {
-    const threshold = 0.004;
+    // Quiet speech at the very start of a phrase must survive trimming, so the
+    // gate sits below the level of a soft spoken word.
+    const threshold = 0.003;
     const windowSize = Math.max(1, Math.floor(sampleRate * 0.02));
     let first = -1;
     let last = -1;
@@ -108,6 +110,10 @@
       this.clip = null;
       this.watch = null;
       this.closed = true;
+      // Rolling buffer of recent microphone audio. It lets a command capture
+      // start with the words the user spoke while the wake check was running.
+      this.preRoll = [];
+      this.preRollSamples = 0;
     }
 
     async open() {
@@ -162,18 +168,39 @@
       const settings = { ...this.defaultOptions, ...options };
       const now = performance.now();
       return new Promise((resolve) => {
+        // Seed the clip with the last moments of audio so “BRO, open settings”
+        // keeps the “open settings” part even though the wake word took a
+        // moment to verify.
+        const chunks = [];
+        let samples = 0;
+        let speechEnergy = 0;
+        const preRollMs = Math.max(0, Math.min(2000, Number(settings.preRollMs) || 0));
+        if (preRollMs > 0 && this.preRoll.length) {
+          let remaining = Math.floor((preRollMs / 1000) * this.sampleRate);
+          for (let index = this.preRoll.length - 1; index >= 0 && remaining > 0; index -= 1) {
+            const chunk = this.preRoll[index];
+            const take = Math.min(chunk.length, remaining);
+            const slice = chunk.subarray(chunk.length - take);
+            chunks.unshift(slice);
+            samples += take;
+            remaining -= take;
+            for (let cursor = 0; cursor < slice.length; cursor += 1) speechEnergy += slice[cursor] * slice[cursor];
+          }
+        }
+        const preRollRms = samples ? Math.sqrt(speechEnergy / samples) : 0;
+        const preRollSpeech = preRollRms >= 0.01;
         this.clip = {
           settings,
           resolve,
-          chunks: [],
-          samples: 0,
+          chunks,
+          samples,
           startedAt: now,
           lastSpeechAt: now,
-          speechMs: 0,
-          heardSpeech: false,
+          speechMs: preRollSpeech ? MIN_SPEECH_MS : 0,
+          heardSpeech: preRollSpeech,
           calibrating: true,
           noiseFloor: 0.004,
-          peak: 0,
+          peak: preRollRms,
           active: true,
         };
       });
@@ -181,10 +208,18 @@
 
     handleSamples(data) {
       if (!data || !data.length) return;
-      const clip = this.clip;
-      if (!clip || !clip.active) return;
       const copy = new Float32Array(data.length);
       copy.set(data);
+      // Keep roughly 1.2 s of recent audio for the next command capture.
+      this.preRoll.push(copy);
+      this.preRollSamples += copy.length;
+      const preRollLimit = Math.floor(this.sampleRate * 1.2);
+      while (this.preRollSamples > preRollLimit && this.preRoll.length > 1) {
+        const removed = this.preRoll.shift();
+        this.preRollSamples -= removed.length;
+      }
+      const clip = this.clip;
+      if (!clip || !clip.active) return;
       clip.chunks.push(copy);
       clip.samples += copy.length;
 
@@ -315,6 +350,8 @@
       this.node = null;
       this.processor = null;
       this.sink = null;
+      this.preRoll = [];
+      this.preRollSamples = 0;
     }
   }
 

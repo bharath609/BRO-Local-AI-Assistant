@@ -22,12 +22,26 @@ const WINDOWS_DESKTOP_TARGETS = Object.freeze({
   excel: Object.freeze({ key: 'excel', label: 'Microsoft Excel', command: 'excel.exe', args: [] }),
   powerpoint: Object.freeze({ key: 'powerpoint', label: 'Microsoft PowerPoint', command: 'powerpnt.exe', args: [] }),
   file_explorer: Object.freeze({ key: 'file_explorer', label: 'File Explorer', command: 'explorer.exe', args: [] }),
-  pictures: Object.freeze({ key: 'pictures', label: 'Pictures', command: 'explorer.exe', folder: 'Pictures' })
+  pictures: Object.freeze({ key: 'pictures', label: 'Pictures', command: 'explorer.exe', folder: 'Pictures' }),
+  device_manager: Object.freeze({ key: 'device_manager', label: 'Device Manager', command: 'devmgmt.msc', args: [] }),
+  programs_and_features: Object.freeze({ key: 'programs_and_features', label: 'Programs and Features', command: 'appwiz.cpl', args: [] }),
+  network_connections: Object.freeze({ key: 'network_connections', label: 'Network Connections', command: 'ncpa.cpl', args: [] }),
+  power_options: Object.freeze({ key: 'power_options', label: 'Power Options', command: 'powercfg.cpl', args: [] }),
+  sound_settings: Object.freeze({ key: 'sound_settings', label: 'Sound Settings', command: 'mmsys.cpl', args: [] }),
+  mouse_settings: Object.freeze({ key: 'mouse_settings', label: 'Mouse Settings', command: 'main.cpl', args: [] }),
+  date_time: Object.freeze({ key: 'date_time', label: 'Date and Time', command: 'timedate.cpl', args: [] }),
+  region: Object.freeze({ key: 'region', label: 'Region', command: 'intl.cpl', args: [] }),
+  internet_options: Object.freeze({ key: 'internet_options', label: 'Internet Options', command: 'inetcpl.cpl', args: [] }),
+  system_information: Object.freeze({ key: 'system_information', label: 'System Information', command: 'msinfo32.exe', args: [] }),
+  event_viewer: Object.freeze({ key: 'event_viewer', label: 'Event Viewer', command: 'eventvwr.msc', args: [] }),
+  disk_management: Object.freeze({ key: 'disk_management', label: 'Disk Management', command: 'diskmgmt.msc', args: [] }),
+  services: Object.freeze({ key: 'services', label: 'Services', command: 'services.msc', args: [] }),
+  printers: Object.freeze({ key: 'printers', label: 'Printers and Devices', command: 'control.exe', args: ['printers'] })
 });
 
 const WINDOWS_DESKTOP_ALIASES = Object.freeze({
   'recycle bin': 'recycle_bin', 'recyclebin': 'recycle_bin',
-  'this pc': 'this_pc', 'my computer': 'this_pc', 'computer': 'this_pc',
+  'this pc': 'this_pc', 'my computer': 'this_pc', computer: 'this_pc',
   downloads: 'downloads',
   documents: 'documents', 'my documents': 'documents',
   desktop: 'desktop',
@@ -40,7 +54,22 @@ const WINDOWS_DESKTOP_ALIASES = Object.freeze({
   excel: 'excel', 'microsoft excel': 'excel',
   powerpoint: 'powerpoint', 'microsoft powerpoint': 'powerpoint', 'power point': 'powerpoint',
   'file explorer': 'file_explorer', explorer: 'file_explorer',
-  pictures: 'pictures', 'pictures folder': 'pictures', 'my pictures': 'pictures'
+  pictures: 'pictures', 'pictures folder': 'pictures', 'my pictures': 'pictures',
+  'device manager': 'device_manager',
+  'programs and features': 'programs_and_features', 'add or remove programs': 'programs_and_features',
+  'uninstall programs': 'programs_and_features',
+  'network connections': 'network_connections', 'network adapters': 'network_connections',
+  'power options': 'power_options',
+  'sound settings': 'sound_settings', 'sound control panel': 'sound_settings',
+  'mouse settings': 'mouse_settings', 'mouse properties': 'mouse_settings',
+  'date and time': 'date_time', 'date time': 'date_time', 'time and date': 'date_time',
+  region: 'region', 'region and language': 'region',
+  'internet options': 'internet_options',
+  'system information': 'system_information',
+  'event viewer': 'event_viewer',
+  'disk management': 'disk_management',
+  services: 'services',
+  printers: 'printers', 'devices and printers': 'printers', 'printer settings': 'printers'
 });
 
 const ACTIVATE_BRO_WINDOW_SCRIPT = String.raw`
@@ -104,6 +133,7 @@ public static class BroWindowsNative {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
 }
 "@
 `;
@@ -151,12 +181,14 @@ $proc = (Get-Process -Id $owner -ErrorAction SilentlyContinue).ProcessName
 [pscustomobject]@{ hwnd = $handle.ToInt64(); pid = [int]$owner; process = [string]$proc; title = $builder.ToString().Trim() } | ConvertTo-Json -Compress
 `;
 
-function runPowerShell(script, timeout = 8_000) {
+function runPowerShell(script, timeout = 8_000, extraEnv = null) {
   return spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
     encoding: 'utf8',
     timeout,
     windowsHide: true,
     shell: false,
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+    maxBuffer: 4 * 1024 * 1024,
   });
 }
 
@@ -219,7 +251,7 @@ function findWindows(query, options = {}) {
   if (!String(query || '').trim()) return [];
   return listWindows({ force: true }).filter((win) => {
     if (options.browsersOnly && !BROWSER_PROCESSES.has(win.process)) return false;
-    if (SHELL_WINDOW_TITLES.has(normalizeWindowText(win.title))) return false;
+    if (!options.includeShell && SHELL_WINDOW_TITLES.has(normalizeWindowText(win.title))) return false;
     if (windowMatchesText(win.title, query)) return true;
     return Boolean(win.process) && windowMatchesText(win.process.replace(/\.exe$/, ''), query);
   });
@@ -365,6 +397,259 @@ function openPath(root, requestedPath = root) {
   return openTarget(validateProjectPath(root, requestedPath), 'path');
 }
 
+// ---- YouTube playback ------------------------------------------------------
+// “play <video name>” should actually play the top result instead of leaving
+// you on a search page. YouTube's own result page is fetched and the first
+// real video is opened directly. Any network problem falls back to search.
+
+const YOUTUBE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+async function findYouTubeVideo(query, { timeoutMs = 6000 } = {}) {
+  const text = String(query || '').trim();
+  if (!text || typeof fetch !== 'function') return null;
+  const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(text)}`;
+  const lookupUrl = `${searchUrl}&sp=EgIQAQ%253D%253D&hl=en`;
+  let html;
+  try {
+    const response = await fetch(lookupUrl, {
+      headers: {
+        'user-agent': YOUTUBE_UA,
+        'accept-language': 'en-US,en;q=0.9',
+        cookie: 'CONSENT=YES+1',
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return null;
+    html = await response.text();
+  } catch {
+    return null;
+  }
+  const match = html.match(/"videoRenderer"\s*:\s*\{\s*"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"/);
+  if (!match) return null;
+  const id = match[1];
+  let title = '';
+  const at = html.indexOf(`"videoId":"${id}"`);
+  if (at >= 0) {
+    const around = html.slice(at, at + 4000);
+    const titleMatch = around.match(/"title"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (titleMatch) {
+      try { title = JSON.parse(`"${titleMatch[1]}"`); } catch { title = titleMatch[1]; }
+    }
+  }
+  return {
+    id,
+    title,
+    url: `https://www.youtube.com/watch?v=${id}`,
+    searchUrl,
+  };
+}
+
+// ---- User file search ------------------------------------------------------
+// “open report.pdf” or, while a folder is open, “open my resume”: BRO looks in
+// the user's own folders only. Paths supplied by the model or by the caller
+// are never trusted; openUserFile re-validates every path against these roots.
+
+const USER_FILE_FOLDERS = ['Desktop', 'Downloads', 'Documents', 'Pictures', 'Videos', 'Music'];
+
+function userFileRoots(preferredFolder = '') {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  if (!home) return [];
+  const bases = [home, path.join(home, 'OneDrive')];
+  const roots = [];
+  const push = (dir) => {
+    if (!dir || roots.includes(dir)) return;
+    try { if (fs.existsSync(dir)) roots.push(dir); } catch { /* ignore */ }
+  };
+  const wanted = String(preferredFolder || '').trim();
+  if (wanted) for (const base of bases) push(path.join(base, wanted));
+  for (const folder of USER_FILE_FOLDERS) for (const base of bases) push(path.join(base, folder));
+  return roots;
+}
+
+const SEARCH_USER_FILES_SCRIPT = String.raw`
+$ErrorActionPreference = 'SilentlyContinue'
+$query = [string]$env:BRO_FILE_QUERY
+if (-not $query) { [Console]::WriteLine('[]'); exit 0 }
+$roots = @($env:BRO_FILE_ROOTS | ConvertFrom-Json)
+$pattern = '*' + [System.Management.Automation.WildcardPattern]::Escape($query) + '*'
+$results = New-Object System.Collections.ArrayList
+foreach ($root in $roots) {
+  if ($results.Count -ge 30) { break }
+  if (-not (Test-Path -LiteralPath $root)) { continue }
+  $take = 30 - $results.Count
+  Get-ChildItem -LiteralPath $root -Recurse -Depth 3 -File -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like $pattern } |
+    Select-Object -First $take |
+    ForEach-Object {
+      [void]$results.Add([pscustomobject]@{
+        path = $_.FullName
+        name = $_.Name
+        dir = $_.DirectoryName
+        size = $_.Length
+        modified = $_.LastWriteTimeUtc.ToString('o')
+      })
+    }
+}
+$results | ConvertTo-Json -Compress
+`;
+
+function normalizeFileQuery(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function scoreUserFile(file, query, preferredFolder = '') {
+  const q = normalizeFileQuery(query);
+  const name = normalizeFileQuery(file.name);
+  const stem = name.replace(/\.[^.]+$/, '');
+  let score;
+  if (name === q) score = 100;
+  else if (stem === q) score = 96;
+  else if (name.startsWith(q)) score = 86;
+  else if (stem.startsWith(q)) score = 83;
+  else if (name.includes(q)) score = 66;
+  else score = 40;
+  if (preferredFolder && normalizeFileQuery(file.dir).includes(normalizeFileQuery(preferredFolder))) score += 12;
+  if (file.modified) {
+    const ageDays = (Date.now() - Date.parse(file.modified)) / 86_400_000;
+    if (Number.isFinite(ageDays) && ageDays < 30) score += 3;
+  }
+  return score;
+}
+
+// Returns the best matching file (or null) from the user's folders.
+function findUserFile(query, { folder = '' } = {}) {
+  if (process.platform !== 'win32') return null;
+  const wanted = String(query || '').trim();
+  if (!wanted) return null;
+  const roots = userFileRoots(folder);
+  if (!roots.length) return null;
+  const probe = runPowerShell(SEARCH_USER_FILES_SCRIPT, 15_000, {
+    BRO_FILE_QUERY: wanted,
+    BRO_FILE_ROOTS: JSON.stringify(roots),
+  });
+  let parsed;
+  try { parsed = JSON.parse(String(probe.stdout || '').trim() || '[]'); } catch { return null; }
+  const items = (Array.isArray(parsed) ? parsed : parsed ? [parsed] : [])
+    .filter((item) => item && item.path && item.name)
+    .map((item) => ({ path: String(item.path), name: String(item.name), dir: String(item.dir || ''), size: Number(item.size) || 0, modified: String(item.modified || '') }));
+  if (!items.length) return null;
+  items.sort((a, b) => {
+    const byScore = scoreUserFile(b, wanted, folder) - scoreUserFile(a, wanted, folder);
+    if (byScore !== 0) return byScore;
+    return Date.parse(b.modified || 0) - Date.parse(a.modified || 0);
+  });
+  return items[0];
+}
+
+// Opens a file that was found by findUserFile. The path is re-checked so a
+// stale or crafted value cannot open something outside the user's folders.
+function openUserFile(filePath) {
+  const absolute = path.resolve(String(filePath || ''));
+  if (!fs.existsSync(absolute)) throw new ToolError('That file is no longer there.');
+  let canonical;
+  try { canonical = fs.realpathSync(absolute); } catch { throw new ToolError('That file is no longer there.'); }
+  const allowed = userFileRoots().some((root) => {
+    try { return isWithinRoot(fs.realpathSync(root), canonical); } catch { return false; }
+  });
+  if (!allowed) throw new ToolError('BRO only opens files inside your Desktop, Downloads, Documents, Pictures, Videos, or Music folders.');
+  return openTarget(canonical, 'file');
+}
+
+function sanitizeFileName(value) {
+  return String(value || '')
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[. ]+$/, '')
+    .trim();
+}
+
+// Creates a folder inside one of the user's own folders (Downloads by default
+// when the caller does not name one). Never accepts a path from speech.
+function createUserFolder(name, folder = '') {
+  const safe = sanitizeFileName(name);
+  if (!safe) throw new ToolError('Tell me what to name the folder.');
+  const wanted = String(folder || '').trim();
+  const roots = userFileRoots(wanted);
+  const base = roots.find((root) => !wanted || path.basename(root).toLowerCase() === wanted.toLowerCase()) || roots[0];
+  if (!base) throw new ToolError('I could not find that folder in your user folders.');
+  const target = path.join(base, safe);
+  if (!isWithinRoot(base, target) || target === base) throw new ToolError('That folder name is not allowed.');
+  if (fs.existsSync(target)) throw new ToolError(`“${safe}” already exists in ${path.basename(base)}.`);
+  fs.mkdirSync(target, { recursive: false });
+  return { created: true, name: safe, path: target, folder: path.basename(base) };
+}
+
+// Renames a file BRO already opened. The new name is sanitized and the path is
+// re-validated against the user's folders.
+function renameUserFile(filePath, newName) {
+  const safe = sanitizeFileName(newName);
+  if (!safe) throw new ToolError('Tell me the new file name.');
+  const absolute = path.resolve(String(filePath || ''));
+  if (!fs.existsSync(absolute)) throw new ToolError('That file is no longer there.');
+  let canonical;
+  try { canonical = fs.realpathSync(absolute); } catch { throw new ToolError('That file is no longer there.'); }
+  const allowed = userFileRoots().some((root) => {
+    try { return isWithinRoot(fs.realpathSync(root), canonical); } catch { return false; }
+  });
+  if (!allowed) throw new ToolError('BRO only renames files inside your own folders.');
+  const directory = path.dirname(canonical);
+  const hasExtension = path.extname(safe) !== '';
+  const finalName = hasExtension ? safe : `${safe}${path.extname(canonical)}`;
+  const target = path.join(directory, finalName);
+  if (target === canonical) throw new ToolError('That is already the file name.');
+  if (fs.existsSync(target)) throw new ToolError(`“${finalName}” already exists in that folder.`);
+  fs.renameSync(canonical, target);
+  return { renamed: true, from: canonical, path: target, name: finalName };
+}
+
+// Opens a specific Windows Settings page. Only ms-settings URIs are accepted so
+// a spoken sentence can never supply an arbitrary command or path.
+function openSettings(uri) {
+  if (process.platform !== 'win32') throw new ToolError('Windows Settings is only available on Windows.');
+  const target = String(uri || 'ms-settings:').trim();
+  if (!/^ms-settings:[a-z0-9-]*$/i.test(target)) throw new ToolError('That settings page is not supported.');
+  const child = spawn('cmd.exe', ['/c', 'start', '', target], { detached: true, stdio: 'ignore', shell: false, windowsHide: true });
+  child.once('error', () => {});
+  child.unref();
+  return { opened: true, uri: target };
+}
+
+// Moves a file BRO opened into the Recycle Bin (recoverable) instead of
+// deleting it outright. The path is re-validated against the user folders.
+function recycleFile(filePath) {
+  if (process.platform !== 'win32') throw new ToolError('Deleting files is only available on Windows.');
+  const absolute = path.resolve(String(filePath || ''));
+  if (!fs.existsSync(absolute)) throw new ToolError('That file is no longer there.');
+  let canonical;
+  try { canonical = fs.realpathSync(absolute); } catch { throw new ToolError('That file is no longer there.'); }
+  const allowed = userFileRoots().some((root) => {
+    try { return isWithinRoot(fs.realpathSync(root), canonical); } catch { return false; }
+  });
+  if (!allowed) throw new ToolError('BRO only moves files from your own folders to the Recycle Bin.');
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName Microsoft.VisualBasic
+[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+  $env:BRO_FILE_PATH,
+  [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+  [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+)
+[Console]::WriteLine('BRO_RECYCLE_OK')
+`;
+  const probe = runPowerShell(script, 15_000, { BRO_FILE_PATH: canonical });
+  if (!String(probe.stdout || '').includes('BRO_RECYCLE_OK')) {
+    throw new ToolError(`Windows could not move “${path.basename(canonical)}” to the Recycle Bin.`);
+  }
+  return { recycled: true, name: path.basename(canonical), path: canonical };
+}
+
+function emptyRecycleBin() {
+  if (process.platform !== 'win32') throw new ToolError('The Recycle Bin is only available on Windows.');
+  const probe = runPowerShell('Clear-RecycleBin -Force -ErrorAction Stop; [Console]::WriteLine("BRO_RECYCLE_EMPTY")', 20_000);
+  if (!String(probe.stdout || '').includes('BRO_RECYCLE_EMPTY')) throw new ToolError('Windows could not empty the Recycle Bin.');
+  return { emptied: true };
+}
+
 function openTerminal() {
   let command;
   let args;
@@ -406,7 +691,16 @@ function activateBro() {
 function openWindowsTarget(target) {
   if (process.platform !== 'win32') throw new ToolError('Windows desktop targets are only available on Windows.');
   const descriptor = resolveWindowsTarget(target);
-  const child = spawn(descriptor.command, descriptor.args, { detached: true, stdio: 'ignore', shell: false, windowsHide: false });
+  // .msc and .cpl tools (Device Manager, Services, …) are documents, not
+  // executables, so hand them to the shell with `start` instead of spawning
+  // them directly (spawning a .msc fails with EFTYPE).
+  const spawnArgs = ['/d', '/c', 'start', '', descriptor.command, ...descriptor.args];
+  let child;
+  try {
+    child = spawn('cmd.exe', spawnArgs, { detached: true, stdio: 'ignore', shell: false, windowsHide: true });
+  } catch (error) {
+    throw new ToolError(`Windows could not open ${descriptor.label}: ${error.message}`);
+  }
   child.once('error', () => {});
   child.unref();
   return { opened: true, kind: 'desktop', target: descriptor.key, label: descriptor.label };
@@ -425,7 +719,20 @@ const START_MENU_ROOTS = [
   path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
   path.join(process.env.PROGRAMDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
 ];
+// Shortcuts and executables the user keeps on the Desktop, plus apps installed
+// per-user (VS Code, Zoom, Teams, …) that may not appear in the Start Menu.
+const DESKTOP_APP_ROOTS = [
+  path.join(process.env.USERPROFILE || '', 'Desktop'),
+  path.join(process.env.OneDrive || '', 'Desktop'),
+  path.join(process.env.OneDriveConsumer || '', 'Desktop'),
+  path.join(process.env.OneDriveCommercial || '', 'Desktop'),
+  path.join(process.env.PUBLIC || '', 'Desktop'),
+];
+const USER_PROGRAM_ROOTS = [
+  path.join(process.env.LOCALAPPDATA || '', 'Programs'),
+];
 const APP_BLOCKLIST = /(uninstall|unins\d|readme|release notes|documentation|license|website|home page|help|manual|setup|repair|check for|tools for|samples for|diagnostic)/i;
+const EXE_BLOCKLIST = /^(?:unins\d*|setup|install|update|updater|helper|crashpad|crashreporter|elevate|vc_?redist|x86_?redist|dxsetup|python|pythonw|node|npm|npx|7z|7za|ffmpeg|ffplay)(?:\.exe)?$/i;
 let startMenuCache = { at: 0, apps: [] };
 let startAppsCache = { at: 0, apps: [] };
 
@@ -471,21 +778,53 @@ function scanStartMenu(force = false) {
   if (process.platform !== 'win32') return [];
   if (!force && startMenuCache.apps.length && Date.now() - startMenuCache.at < 5 * 60_000) return startMenuCache.apps;
   const apps = [];
-  const walk = (dir, depth) => {
+  const seen = new Set();
+  const addApp = (name, fullPath) => {
+    const clean = String(name || '').trim();
+    if (!clean || APP_BLOCKLIST.test(clean)) return;
+    const normalized = normalizeAppName(clean);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    apps.push({ name: clean, path: fullPath, normalized });
+  };
+  const walkShortcuts = (dir, depth) => {
     if (depth > 4) return;
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full, depth + 1);
-      else if (/\.lnk$/i.test(entry.name) && !APP_BLOCKLIST.test(entry.name)) {
-        apps.push({ name: entry.name.replace(/\.lnk$/i, ''), path: full, normalized: normalizeAppName(entry.name) });
+      if (entry.isDirectory()) walkShortcuts(full, depth + 1);
+      else if (/\.lnk$/i.test(entry.name)) addApp(entry.name.replace(/\.lnk$/i, ''), full);
+    }
+  };
+  const walkExecutables = (dir, depth) => {
+    if (depth > 3) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!/^(?:uninstall|update|updater|crash|logs?|resources|locales?|plugins?|extensions?|node_modules|\.git)$/i.test(entry.name)) {
+          walkExecutables(full, depth + 1);
+        }
+      } else if (/\.exe$/i.test(entry.name) && !EXE_BLOCKLIST.test(entry.name)) {
+        addApp(entry.name.replace(/\.exe$/i, ''), full);
       }
     }
   };
-  for (const root of START_MENU_ROOTS) if (root) walk(root, 0);
+  for (const root of START_MENU_ROOTS) if (root) walkShortcuts(root, 0);
+  for (const root of DESKTOP_APP_ROOTS) if (root) {
+    let entries;
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (entry.isDirectory()) continue;
+      const full = path.join(root, entry.name);
+      if (/\.lnk$/i.test(entry.name)) addApp(entry.name.replace(/\.lnk$/i, ''), full);
+      else if (/\.exe$/i.test(entry.name) && !EXE_BLOCKLIST.test(entry.name)) addApp(entry.name.replace(/\.exe$/i, ''), full);
+    }
+  }
+  for (const root of USER_PROGRAM_ROOTS) if (root) walkExecutables(root, 0);
   // Add Store/MSIX apps that do not have a .lnk shortcut.
-  const seen = new Set(apps.map((app) => app.normalized));
   for (const app of scanStartApps(force)) {
     if (seen.has(app.normalized)) continue;
     seen.add(app.normalized);
@@ -495,15 +834,52 @@ function scanStartMenu(force = false) {
   return apps;
 }
 
+// Spoken short names that differ from the installed app's name.
+const APP_QUERY_ALIASES = Object.freeze({
+  'vs code': 'visual studio code',
+  vscode: 'visual studio code',
+  'vs': 'visual studio',
+  'ms teams': 'microsoft teams',
+  teams: 'microsoft teams',
+  chrome: 'google chrome',
+  edge: 'microsoft edge',
+  word: 'microsoft word',
+  excel: 'microsoft excel',
+  powerpoint: 'microsoft powerpoint',
+  outlook: 'microsoft outlook',
+  onenote: 'microsoft onenote',
+  photoshop: 'adobe photoshop',
+  'acrobat reader': 'adobe acrobat reader',
+  'after effects': 'adobe after effects',
+});
+
+function normalizeAppQuery(value) {
+  const base = normalizeAppName(value);
+  if (!base) return [];
+  const alias = APP_QUERY_ALIASES[base];
+  return alias && alias !== base ? [base, alias] : [base];
+}
+
 function scoreAppName(app, wanted) {
-  const query = normalizeAppName(wanted);
-  if (!query) return 0;
-  if (app.normalized === query) return 100;
-  if (app.normalized.startsWith(`${query} `)) return 85;
-  if (app.normalized.includes(query)) return 70;
-  const tokens = query.split(' ').filter(Boolean);
-  const appTokens = new Set(app.normalized.split(' '));
-  return tokens.length && tokens.every((token) => appTokens.has(token)) ? 60 : 0;
+  const queries = normalizeAppQuery(wanted);
+  if (!queries.length) return 0;
+  let best = 0;
+  for (const query of queries) {
+    if (app.normalized === query) return 100;
+    if (app.normalized.startsWith(`${query} `)) best = Math.max(best, 85);
+    else if (app.normalized.includes(query)) best = Math.max(best, 70);
+    else {
+      const tokens = query.split(' ').filter(Boolean);
+      const appTokens = new Set(app.normalized.split(' '));
+      if (tokens.length && tokens.every((token) => appTokens.has(token))) best = Math.max(best, 60);
+      // “SQLiteStudio” spoken as “sqlite studio”, or “OpenCode” as “open code”.
+      const compactQuery = query.replace(/\s+/g, '');
+      const compactApp = app.normalized.replace(/\s+/g, '');
+      if (compactQuery && compactQuery === compactApp) best = Math.max(best, 95);
+      else if (compactQuery && compactApp.includes(compactQuery)) best = Math.max(best, 75);
+    }
+  }
+  return best;
 }
 
 function findInstalledApp(names) {
@@ -580,6 +956,11 @@ function normalizeProcessName(value) {
 function shortcutTargetName(lnkPath) {
   if (shortcutTargetCache.has(lnkPath)) return shortcutTargetCache.get(lnkPath);
   if (process.platform !== 'win32' || /^shell:/i.test(String(lnkPath))) return '';
+  if (/\.exe$/i.test(String(lnkPath))) {
+    const name = normalizeProcessName(path.basename(lnkPath));
+    shortcutTargetCache.set(lnkPath, name);
+    return name;
+  }
   const script = `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${String(lnkPath).replace(/'/g, "''")}'); if ($s.TargetPath) { [Console]::WriteLine($s.TargetPath) }`;
   const probe = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 6_000, windowsHide: true });
   const target = (probe.stdout || '').trim();
@@ -865,7 +1246,577 @@ async function closeAllWindows() {
   return result;
 }
 
-// One close routine used by every close command:
+// Brings back, minimizes, maximizes, or restores a window by name (or — for a
+// website BRO opened — the topmost browser window). This is what powers
+// references like “check it once”, “bring that back”, or “minimize it”.
+const WINDOW_CONTROL_COMMANDS = Object.freeze({ focus: 9, restore: 9, minimize: 6, maximize: 3 });
+
+function controlWindow(target, mode = 'focus') {
+  if (process.platform !== 'win32') throw new ToolError('Window control is only available on Windows.');
+  const wanted = typeof target === 'string' ? { label: target } : (target || {});
+  const label = String(wanted.label || wanted.name || wanted.id || '').trim();
+  const wantedMode = String(mode || 'focus').toLowerCase();
+  const command = WINDOW_CONTROL_COMMANDS[wantedMode] || 9;
+
+  let matches = label ? findWindows(label, { includeShell: Boolean(wanted.includeShell) }) : [];
+  if (!matches.length && (wanted.kind === 'site' || wanted.kind === 'website')) {
+    // The page title changes once the user clicks into it, so fall back to the
+    // browser window that is currently in front.
+    matches = listWindows({ force: true }).filter((win) => BROWSER_PROCESSES.has(win.process));
+  }
+  const win = matches[0];
+  if (!win) {
+    throw new ToolError(`I could not find the window for “${label || 'that'}”. It may already be closed.`);
+  }
+
+  const focus = wantedMode === 'focus' || wantedMode === 'restore';
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BroWindowControl {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+}
+"@
+$handle = [IntPtr]${Number(win.hwnd)}
+[void][BroWindowControl]::ShowWindowAsync($handle, ${command})
+${focus ? `
+$foreground = [BroWindowControl]::GetForegroundWindow()
+$foregroundThread = [BroWindowControl]::GetWindowThreadProcessId($foreground, [IntPtr]::Zero)
+$targetThread = [BroWindowControl]::GetWindowThreadProcessId($handle, [IntPtr]::Zero)
+[void][BroWindowControl]::AttachThreadInput($foregroundThread, $targetThread, $true)
+[void][BroWindowControl]::SetForegroundWindow($handle)
+[void][BroWindowControl]::BringWindowToTop($handle)
+[void][BroWindowControl]::AttachThreadInput($foregroundThread, $targetThread, $false)
+Start-Sleep -Milliseconds 120` : ''}
+[Console]::WriteLine('BRO_WINDOW_CONTROL_OK')
+`;
+  runPowerShell(script, 8_000);
+  return {
+    label: win.title || win.process.replace(/\.exe$/, ''),
+    window: win.title,
+    process: win.process,
+    hwnd: win.hwnd,
+    mode: wantedMode,
+    controlled: true,
+  };
+}
+
+// Windows that apps restore at their old (often small) size look like they
+// opened "minimized". After BRO opens something, grow the window to the
+// monitor's work area unless it is already nearly full size. The decision is
+// made in PowerShell from the real window and monitor rectangles so dialogs
+// and genuinely small windows are left alone when they already fill the screen.
+const MAXIMIZE_NATIVE = String.raw`
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BroMaximize {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO info);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, ref uint processId);
+}
+"@
+`;
+
+function maximizeWindowByHwnd(hwnd, { threshold = 0.95 } = {}) {
+  const handle = Number(hwnd);
+  if (!handle || process.platform !== 'win32') return { maximized: false };
+  const script = `${MAXIMIZE_NATIVE}
+$handle = [IntPtr]${handle}
+if ([BroMaximize]::IsZoomed($handle)) { [Console]::WriteLine('BRO_ALREADY_MAXIMIZED'); exit 0 }
+$rect = New-Object BroMaximize+RECT
+[void][BroMaximize]::GetWindowRect($handle, [ref]$rect)
+$monitor = [BroMaximize]::MonitorFromWindow($handle, 2)
+$info = New-Object BroMaximize+MONITORINFO
+$info.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($info)
+[void][BroMaximize]::GetMonitorInfo($monitor, [ref]$info)
+$width = $rect.Right - $rect.Left
+$height = $rect.Bottom - $rect.Top
+$workWidth = $info.rcWork.Right - $info.rcWork.Left
+$workHeight = $info.rcWork.Bottom - $info.rcWork.Top
+if ($width -le 0 -or $height -le 0 -or $workWidth -le 0 -or $workHeight -le 0) { [Console]::WriteLine('BRO_MAXIMIZE_SKIPPED'); exit 0 }
+if (($width -lt ($workWidth * ${Number(threshold)})) -or ($height -lt ($workHeight * ${Number(threshold)}))) {
+  [void][BroMaximize]::ShowWindowAsync($handle, 3)
+  [Console]::WriteLine('BRO_MAXIMIZED')
+} else {
+  [Console]::WriteLine('BRO_ALREADY_LARGE')
+}`;
+  let stdout = '';
+  try { stdout = runPowerShell(script, 8_000).stdout || ''; } catch { /* best effort */ }
+  return {
+    maximized: /BRO_MAXIMIZED/.test(stdout),
+    alreadyMaximized: /BRO_ALREADY_MAXIMIZED/.test(stdout),
+    alreadyLarge: /BRO_ALREADY_LARGE/.test(stdout),
+  };
+}
+
+// Maximizes whichever window currently owns the foreground, unless that window
+// belongs to BRO itself. Used after a website opens in the browser.
+function maximizeForegroundWindow({ threshold = 0.95 } = {}) {
+  if (process.platform !== 'win32') return { maximized: false };
+  const script = `${MAXIMIZE_NATIVE}
+$handle = [BroMaximize]::GetForegroundWindow()
+if ($handle -eq [IntPtr]::Zero) { [Console]::WriteLine('BRO_MAXIMIZE_SKIPPED'); exit 0 }
+[uint32]$owner = 0
+[void][BroMaximize]::GetWindowThreadProcessId($handle, [ref]$owner)
+$proc = Get-Process -Id $owner -ErrorAction SilentlyContinue
+if ($proc -and $proc.ProcessName -eq 'electron') { [Console]::WriteLine('BRO_MAXIMIZE_SKIPPED'); exit 0 }
+if ([BroMaximize]::IsZoomed($handle)) { [Console]::WriteLine('BRO_ALREADY_MAXIMIZED'); exit 0 }
+$rect = New-Object BroMaximize+RECT
+[void][BroMaximize]::GetWindowRect($handle, [ref]$rect)
+$monitor = [BroMaximize]::MonitorFromWindow($handle, 2)
+$info = New-Object BroMaximize+MONITORINFO
+$info.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($info)
+[void][BroMaximize]::GetMonitorInfo($monitor, [ref]$info)
+$width = $rect.Right - $rect.Left
+$height = $rect.Bottom - $rect.Top
+$workWidth = $info.rcWork.Right - $info.rcWork.Left
+$workHeight = $info.rcWork.Bottom - $info.rcWork.Top
+if ($width -le 0 -or $height -le 0 -or $workWidth -le 0 -or $workHeight -le 0) { [Console]::WriteLine('BRO_MAXIMIZE_SKIPPED'); exit 0 }
+if (($width -lt ($workWidth * ${Number(threshold)})) -or ($height -lt ($workHeight * ${Number(threshold)}))) {
+  [void][BroMaximize]::ShowWindowAsync($handle, 3)
+  [Console]::WriteLine('BRO_MAXIMIZED')
+} else {
+  [Console]::WriteLine('BRO_ALREADY_LARGE')
+}`;
+  let stdout = '';
+  try { stdout = runPowerShell(script, 8_000).stdout || ''; } catch { /* best effort */ }
+  return {
+    maximized: /BRO_MAXIMIZED/.test(stdout),
+    alreadyMaximized: /BRO_ALREADY_MAXIMIZED/.test(stdout),
+    alreadyLarge: /BRO_ALREADY_LARGE/.test(stdout),
+  };
+}
+
+// ---- Bringing opened windows forward --------------------------------------
+// Launching through `start` can leave the new window behind the current one.
+// These helpers wait briefly for the window to appear, focus it, and then keep
+// the BRO overlay above it without stealing keyboard focus back from the app.
+
+async function focusOpenedWindow(labels, {
+  attempts = 8,
+  delayMs = 500,
+  maximize = process.env.BRO_MAXIMIZE_OPENS !== '0',
+} = {}) {
+  if (process.platform !== 'win32') return { focused: false };
+  const candidates = (Array.isArray(labels) ? labels : [labels])
+    .map((label) => String(label || '').trim())
+    .filter(Boolean);
+  if (!candidates.length) return { focused: false };
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    for (const label of candidates) {
+      let matches = [];
+      try { matches = findWindows(label, { includeShell: true }); } catch { matches = []; }
+      if (!matches.length) continue;
+      try {
+        const focused = controlWindow({ label: matches[0].title, includeShell: true }, 'focus');
+        const sized = maximize ? maximizeWindowByHwnd(matches[0].hwnd) : { maximized: false };
+        return { focused: true, label: matches[0].title, maximized: Boolean(sized.maximized), hwnd: matches[0].hwnd };
+      } catch { /* try the next candidate or retry */ }
+    }
+    if (attempt < attempts - 1) await delay(delayMs);
+  }
+  return { focused: false };
+}
+
+function raiseBroOverlay() {
+  if (process.platform !== 'win32') return { raised: false };
+  const windows = listWindows({ force: true, includeBro: true })
+    .filter((win) => /electron/i.test(win.process || '') && /^(?:bro\s*(?:voice|overlay).*)$/i.test(win.title || ''));
+  if (!windows.length) return { raised: false };
+  for (const win of windows) {
+    const script = `${WINDOW_NATIVE}
+$handle = [IntPtr]${Number(win.hwnd)}
+[void][BroWindowsNative]::SetWindowPos($handle, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010)
+[Console]::WriteLine('BRO_TOPMOST_OK')`;
+    try { runPowerShell(script, 5_000); } catch { /* best effort */ }
+  }
+  return { raised: true, count: windows.length };
+}
+
+// ---- Universal desktop controls -------------------------------------------
+// These power the application-control skill: keyboard shortcuts, media keys,
+// scrolling, screenshots, UI Automation clicks, folders, and system actions.
+
+const SEND_KEYS_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait($env:BRO_KEYS)
+[Console]::WriteLine('BRO_KEYS_OK')
+`;
+
+// Characters SendKeys treats as commands must be wrapped in braces.
+function escapeSendKeys(value) {
+  return String(value == null ? '' : value)
+    .replace(/[+^%~()[\]{}]/g, (ch) => `{${ch}}`)
+    .replace(/\r?\n/g, '{ENTER}');
+}
+
+function sendKeys(sequence) {
+  if (process.platform !== 'win32') throw new ToolError('Sending keys is only available on Windows.');
+  const keys = String(sequence || '');
+  if (!keys) throw new ToolError('There are no keys to send.');
+  const probe = runPowerShell(SEND_KEYS_SCRIPT, 6_000, { BRO_KEYS: keys });
+  if (!String(probe.stdout || '').includes('BRO_KEYS_OK')) {
+    throw new ToolError(`Windows did not accept the key command (${String(probe.stderr || '').trim() || 'unknown error'}).`);
+  }
+  return { sent: keys };
+}
+
+function typeText(value) {
+  const text = String(value == null ? '' : value);
+  if (!text.trim()) throw new ToolError('There is no text to type.');
+  return sendKeys(escapeSendKeys(text));
+}
+
+const KEY_NAMES = {
+  enter: '{ENTER}', return: '{ENTER}', escape: '{ESC}', esc: '{ESC}', tab: '{TAB}',
+  space: ' ', backspace: '{BACKSPACE}', delete: '{DELETE}', insert: '{INSERT}',
+  up: '{UP}', down: '{DOWN}', left: '{LEFT}', right: '{RIGHT}',
+  home: '{HOME}', end: '{END}', 'page up': '{PGUP}', pgup: '{PGUP}',
+  'page down': '{PGDN}', pgdn: '{PGDN}', 'caps lock': '{CAPSLOCK}',
+};
+
+const MODIFIER_NAMES = { control: '^', ctrl: '^', alt: '%', shift: '+', windows: '', win: '', meta: '' };
+
+function keySequenceFor(words) {
+  const parts = String(words || '').toLowerCase().trim().split(/[\s+-]+/).filter(Boolean);
+  let prefix = '';
+  let key = null;
+  for (const part of parts) {
+    if (Object.hasOwn(MODIFIER_NAMES, part)) {
+      prefix += MODIFIER_NAMES[part];
+      continue;
+    }
+    if (Object.hasOwn(KEY_NAMES, part)) { key = KEY_NAMES[part]; continue; }
+    if (/^f(?:[1-9]|1\d|2[0-4])$/.test(part)) { key = `{${part.toUpperCase()}}`; continue; }
+    if (part.length === 1) { key = part; continue; }
+    key = `{${part.toUpperCase()}}`;
+  }
+  if (!key) throw new ToolError('I did not recognise that key.');
+  return `${prefix}${key}`;
+}
+
+const MEDIA_KEYS = {
+  play_pause: 0xB3, play: 0xB3, pause: 0xB3, stop: 0xB2,
+  next: 0xB0, previous: 0xB1, mute: 0xAD, volume_up: 0xAF, volume_down: 0xAE,
+};
+
+const MEDIA_KEY_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BroMediaKeys {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+"@
+$code = [byte][int]$env:BRO_MEDIA_VK
+[BroMediaKeys]::keybd_event($code, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 70
+[BroMediaKeys]::keybd_event($code, 0, 2, [UIntPtr]::Zero)
+[Console]::WriteLine('BRO_MEDIA_OK')
+`;
+
+function mediaKey(name) {
+  if (process.platform !== 'win32') throw new ToolError('Media keys are only available on Windows.');
+  const key = String(name || '').toLowerCase();
+  const code = MEDIA_KEYS[key];
+  if (!code) throw new ToolError('That media key is not supported.');
+  const probe = runPowerShell(MEDIA_KEY_SCRIPT, 6_000, { BRO_MEDIA_VK: String(code) });
+  if (!String(probe.stdout || '').includes('BRO_MEDIA_OK')) throw new ToolError('Windows did not accept the media key.');
+  return { key, sent: true };
+}
+
+// Windows-key shortcuts (Start, Task View, Run, Quick Settings, clipboard,
+// emoji picker, …) cannot be typed through SendKeys, so they are sent as real
+// virtual-key events. An empty combo taps the Windows key on its own.
+const WIN_KEY_CODES = {
+  tab: 0x09, escape: 0x1B, esc: 0x1B, space: 0x20, enter: 0x0D,
+  left: 0x25, up: 0x26, right: 0x27, down: 0x28, home: 0x24, end: 0x23,
+  insert: 0x2D, delete: 0x2E, backspace: 0x08, period: 0xBE, dot: 0xBE,
+  comma: 0xBC, plus: 0xBB, minus: 0xBD, printscreen: 0x2C, 'print screen': 0x2C,
+};
+
+const WIN_KEY_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BroWinKeyNative {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+"@
+[BroWinKeyNative]::keybd_event(0x5B, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 60
+$vk = [int]$env:BRO_WIN_VK
+if ($vk -gt 0) {
+  [BroWinKeyNative]::keybd_event([byte]$vk, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 60
+  [BroWinKeyNative]::keybd_event([byte]$vk, 0, 2, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 40
+}
+[BroWinKeyNative]::keybd_event(0x5B, 0, 2, [UIntPtr]::Zero)
+[Console]::WriteLine('BRO_WINKEY_OK')
+`;
+
+function pressWindowsKey(combo = '') {
+  if (process.platform !== 'win32') throw new ToolError('Windows shortcuts are only available on Windows.');
+  const key = String(combo || '').toLowerCase().trim();
+  let vk = 0;
+  if (key) {
+    if (/^[a-z]$/.test(key)) vk = key.toUpperCase().charCodeAt(0);
+    else if (/^[0-9]$/.test(key)) vk = key.charCodeAt(0);
+    else if (Object.hasOwn(WIN_KEY_CODES, key)) vk = WIN_KEY_CODES[key];
+    else throw new ToolError('That Windows shortcut is not supported.');
+  }
+  const probe = runPowerShell(WIN_KEY_SCRIPT, 6_000, { BRO_WIN_VK: String(vk) });
+  if (!String(probe.stdout || '').includes('BRO_WINKEY_OK')) throw new ToolError('Windows did not accept the shortcut.');
+  return { keys: key || 'windows', sent: true };
+}
+
+const SCROLL_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BroScrollNative {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, int data, UIntPtr extra);
+}
+"@
+$handle = [BroScrollNative]::GetForegroundWindow()
+$rect = New-Object BroScrollNative+RECT
+[void][BroScrollNative]::GetWindowRect($handle, [ref]$rect)
+$origin = New-Object BroScrollNative+POINT
+[void][BroScrollNative]::GetCursorPos([ref]$origin)
+# Aim at the middle of the content area (below the title bar and toolbar) so
+# lists such as Gmail and YouTube scroll no matter where the pointer was.
+$x = [int](($rect.Left + $rect.Right) / 2)
+$y = [int]($rect.Top + (($rect.Bottom - $rect.Top) * 0.55))
+[void][BroScrollNative]::SetCursorPos($x, $y)
+$flags = [uint32]$env:BRO_SCROLL_FLAGS
+$delta = [int]$env:BRO_SCROLL_DELTA
+$notches = [int]$env:BRO_SCROLL_NOTCHES
+for ($i = 0; $i -lt $notches; $i++) {
+  [BroScrollNative]::mouse_event($flags, 0, 0, $delta, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 18
+}
+# Put the pointer back where the user left it.
+[void][BroScrollNative]::SetCursorPos($origin.X, $origin.Y)
+[Console]::WriteLine('BRO_SCROLL_OK')
+`;
+
+// One wheel notch is 120 units. A positive vertical delta scrolls up (the
+// content moves down), so "down" must be negative — the earlier implementation
+// had this backwards. Horizontal scrolling uses MOUSEEVENTF_HWHEEL.
+function scrollActiveWindow(direction = 'down', amount = 0) {
+  if (process.platform !== 'win32') throw new ToolError('Scrolling is only available on Windows.');
+  const dir = String(direction || 'down').toLowerCase();
+  const fallback = dir === 'left' || dir === 'right' ? 4 : 5;
+  const notches = Math.max(1, Math.min(30, Math.round(Number(amount) || fallback)));
+  const horizontal = dir === 'left' || dir === 'right';
+  const forward = dir === 'up' || dir === 'right';
+  const probe = runPowerShell(SCROLL_SCRIPT, 10_000, {
+    BRO_SCROLL_FLAGS: horizontal ? '4096' : '2048',
+    BRO_SCROLL_DELTA: String(forward ? 120 : -120),
+    BRO_SCROLL_NOTCHES: String(notches),
+  });
+  if (!String(probe.stdout || '').includes('BRO_SCROLL_OK')) throw new ToolError('Windows did not scroll the active window.');
+  return { direction: dir, notches };
+}
+
+const SCREENSHOT_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$dir = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'BRO Screenshots'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, $bitmap.Size)
+$name = 'BRO ' + (Get-Date -Format 'yyyy-MM-dd HH-mm-ss') + '.png'
+$file = Join-Path $dir $name
+$bitmap.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+$graphics.Dispose()
+$bitmap.Dispose()
+[Console]::WriteLine($file)
+`;
+
+function takeScreenshot() {
+  if (process.platform !== 'win32') throw new ToolError('Screenshots are only available on Windows.');
+  const probe = runPowerShell(SCREENSHOT_SCRIPT, 15_000);
+  const file = String(probe.stdout || '').trim().split(/\r?\n/).pop();
+  if (!file || !fs.existsSync(file)) throw new ToolError('Windows could not save the screenshot.');
+  return { saved: true, path: file, name: path.basename(file) };
+}
+
+const SHOW_DESKTOP_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BroShowDesktop {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+"@
+[BroShowDesktop]::keybd_event(0x5B, 0, 0, [UIntPtr]::Zero)
+[BroShowDesktop]::keybd_event(0x44, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 80
+[BroShowDesktop]::keybd_event(0x44, 0, 2, [UIntPtr]::Zero)
+[BroShowDesktop]::keybd_event(0x5B, 0, 2, [UIntPtr]::Zero)
+[Console]::WriteLine('BRO_DESKTOP_OK')
+`;
+
+function showDesktop() {
+  if (process.platform !== 'win32') throw new ToolError('Showing the desktop is only available on Windows.');
+  const probe = runPowerShell(SHOW_DESKTOP_SCRIPT, 6_000);
+  if (!String(probe.stdout || '').includes('BRO_DESKTOP_OK')) throw new ToolError('Windows did not show the desktop.');
+  return { shown: true };
+}
+
+const UI_CLICK_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BroUiClickNative {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, int data, UIntPtr extra);
+}
+"@
+$handle = [BroUiClickNative]::GetForegroundWindow()
+if (-not $handle) { [Console]::WriteLine('NOT_FOUND'); exit 0 }
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+if (-not $root) { [Console]::WriteLine('NOT_FOUND'); exit 0 }
+
+function Invoke-Element($element) {
+  try {
+    $pattern = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $pattern.Invoke()
+    return $true
+  } catch { }
+  try {
+    $pattern = $element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    $pattern.Select()
+    return $true
+  } catch { }
+  try {
+    $point = $element.GetClickablePoint()
+    [void][BroUiClickNative]::SetCursorPos([int]$point.X, [int]$point.Y)
+    $flags = 0x0002 -bor 0x0004
+    if ($env:BRO_UI_BUTTON -eq 'right') { $flags = 0x0008 -bor 0x0010 }
+    [BroUiClickNative]::mouse_event($flags, 0, 0, 0, [UIntPtr]::Zero)
+    if ($env:BRO_UI_DOUBLE -eq '1') { [BroUiClickNative]::mouse_event($flags, 0, 0, 0, [UIntPtr]::Zero) }
+    return $true
+  } catch { return $false }
+}
+
+$element = $null
+if ($env:BRO_UI_FIRST -eq '1') {
+  $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+  $candidates = New-Object System.Collections.ArrayList
+  $unread = New-Object System.Collections.ArrayList
+  foreach ($item in $all) {
+    try {
+      $type = $item.Current.ControlType.ProgrammaticName
+      $name = [string]$item.Current.Name
+      if (-not $name -or $name.Length -lt 3) { continue }
+      if (-not $item.Current.IsEnabled -or $item.Current.IsOffscreen) { continue }
+      if ($type -notmatch 'ListItem|DataItem|Hyperlink') { continue }
+      if ($name -match '^(inbox|sent|starred|drafts|spam|trash|compose|search|settings|help|more|menu|back|forward|reload|home|notifications|messaging|jobs|my network)$') { continue }
+      $rect = $item.Current.BoundingRectangle
+      if ($rect.Width -lt 60 -or $rect.Height -lt 12) { continue }
+      [void]$candidates.Add([pscustomobject]@{ Element = $item; Top = $rect.Top; Left = $rect.Left })
+      if ($name -match 'unread') { [void]$unread.Add([pscustomobject]@{ Element = $item; Top = $rect.Top; Left = $rect.Left }) }
+    } catch { }
+  }
+  if ($env:BRO_UI_UNREAD -eq '1') {
+    if ($unread.Count -eq 0) { [Console]::WriteLine('NOT_FOUND'); exit 0 }
+    $candidates = $unread
+  }
+  $ordered = $candidates | Sort-Object Top, Left
+  if ($ordered.Count -gt 0) { $element = $ordered[0].Element }
+} else {
+  $name = [string]$env:BRO_UI_NAME
+  $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $name)
+  $element = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+  if (-not $element) {
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($item in $all) {
+      try {
+        if ([string]$item.Current.Name -like "*$name*" -and $item.Current.IsEnabled -and -not $item.Current.IsOffscreen) { $element = $item; break }
+      } catch { }
+    }
+  }
+}
+
+if (-not $element) { [Console]::WriteLine('NOT_FOUND'); exit 0 }
+if (Invoke-Element $element) { [Console]::WriteLine('BRO_CLICK_OK') } else { [Console]::WriteLine('NOT_FOUND') }
+`;
+
+function clickElement(name, { button = 'left', double = false } = {}) {
+  if (process.platform !== 'win32') throw new ToolError('Clicking UI elements is only available on Windows.');
+  const label = String(name || '').trim();
+  if (!label) throw new ToolError('Which visible label should I click?');
+  const probe = runPowerShell(UI_CLICK_SCRIPT, 20_000, { BRO_UI_NAME: label, BRO_UI_BUTTON: button, BRO_UI_FIRST: '0', BRO_UI_DOUBLE: double ? '1' : '0' });
+  if (!String(probe.stdout || '').includes('BRO_CLICK_OK')) throw new ToolError(`I could not find a visible “${label}” to click.`);
+  return { clicked: true, name: label, button, double };
+}
+
+function clickFirstResult({ unread = false } = {}) {
+  if (process.platform !== 'win32') throw new ToolError('Clicking UI elements is only available on Windows.');
+  const probe = runPowerShell(UI_CLICK_SCRIPT, 20_000, { BRO_UI_NAME: '', BRO_UI_BUTTON: 'left', BRO_UI_FIRST: '1', BRO_UI_DOUBLE: '0', BRO_UI_UNREAD: unread ? '1' : '0' });
+  if (!String(probe.stdout || '').includes('BRO_CLICK_OK')) {
+    throw new ToolError(unread
+      ? 'I could not identify an unread item on screen. Open the inbox first, then try again.'
+      : 'I could not identify the first result on screen. Try “click …” with the exact visible label.');
+  }
+  return { clicked: true, first: true, unread: Boolean(unread) };
+}
+
+function lockWorkstation() {
+  if (process.platform !== 'win32') throw new ToolError('Locking the PC is only available on Windows.');
+  const probe = runPowerShell("rundll32.exe user32.dll,LockWorkStation", 5_000);
+  if (probe.error) throw new ToolError('Windows did not lock the session.');
+  return { locked: true };
+}
+
+function systemPower(mode) {
+  if (process.platform !== 'win32') throw new ToolError('Power control is only available on Windows.');
+  const wanted = String(mode || '').toLowerCase();
+  if (wanted !== 'shutdown' && wanted !== 'restart') throw new ToolError('Only shutdown and restart are supported.');
+  const flag = wanted === 'restart' ? '/r' : '/s';
+  const probe = spawnSync('shutdown.exe', [flag, '/t', '0'], { encoding: 'utf8', timeout: 5_000, windowsHide: true });
+  if (probe.error) throw new ToolError(`Windows did not accept the ${wanted} request.`);
+  return { mode: wanted, requested: true };
+}
+
+// ---- One close routine used by every close command:
 //   1. the exact windows and PIDs BRO itself launched (precise, works for Store apps)
 //   2. image names from the catalog or the shortcut target
 //   3. window titles as a last resort
@@ -1136,6 +2087,34 @@ module.exports = {
   closeWebsite,
   closeForegroundWindow,
   closeAllWindows,
+  controlWindow,
+  findUserFile,
+  openUserFile,
+  userFileRoots,
+  USER_FILE_FOLDERS,
+  findYouTubeVideo,
+  createUserFolder,
+  renameUserFile,
+  openSettings,
+  recycleFile,
+  emptyRecycleBin,
+  focusOpenedWindow,
+  maximizeWindowByHwnd,
+  maximizeForegroundWindow,
+  raiseBroOverlay,
+  sendKeys,
+  typeText,
+  keySequenceFor,
+  mediaKey,
+  pressWindowsKey,
+  scrollActiveWindow,
+  takeScreenshot,
+  showDesktop,
+  clickElement,
+  clickFirstResult,
+  lockWorkstation,
+  systemPower,
+  escapeSendKeys,
   listWindows,
   findWindows,
   windowMatchesText,
