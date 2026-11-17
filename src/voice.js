@@ -363,7 +363,7 @@ const WAKE_PHRASES = [
   // variants observed from room audio, not extra commands.
   'bros', 'broh', 'brah', 'brow',
 ];
-const SLEEP_PHRASES = new Set(['stop listening', 'sleep', 'go to sleep', 'go quiet', 'goodbye', 'good bye', 'bye', 'bye bro', 'shut up', 'thats all', 'that is all']);
+const SLEEP_PHRASES = new Set(['stop listening', 'sleep', 'go to sleep', 'go to sleep mode', 'go quiet', 'goodbye', 'good bye', 'bye', 'bye bro', 'shut up', 'thats all', 'that is all', 'sleep mode', 'sleeping']);
 
 function normalizeSpoken(value) {
   return String(value || '')
