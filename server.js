@@ -337,6 +337,9 @@ async function bringOpenedThingForward(action, outcome) {
   const result = (outcome && outcome.result) || {};
   try {
     if (action.type === 'open_url') {
+      // A browser that accepted --start-maximized is already full screen, so
+      // there is nothing to grow and no small-window flash to clean up.
+      if (result.maximized) return;
       // Give the browser a moment to raise the new tab, then make that window
       // fill the screen. A restored browser window otherwise opens small.
       for (let attempt = 0; attempt < 8; attempt += 1) {

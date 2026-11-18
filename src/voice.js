@@ -363,6 +363,10 @@ const WAKE_PHRASES = [
   // variants observed from room audio, not extra commands.
   'bros', 'broh', 'brah', 'brow',
 ];
+// Sleep is matched by shape rather than a fixed list, so “go to sleep mode”,
+// “sleep mode”, “go sleep”, “sleeping”, and small mis-hearings all work without
+// the user having to repeat themselves.
+const SLEEP_PATTERN = /^(?:go\s+(?:to\s+)?(?:the\s+)?sleep(?:\s+mode)?|go\s+to\s+bed|sleep(?:\s+mode)?|sleeping|stop\s+listening|stop\s+the\s+listening|go\s+quiet|go\s+away|disappear|hide(?:\s+yourself)?|good\s?bye|bye(?:\s+bro)?|shut\s+up|that(?:s|\s+is)\s+all)$/;
 const SLEEP_PHRASES = new Set(['stop listening', 'sleep', 'go to sleep', 'go to sleep mode', 'go quiet', 'goodbye', 'good bye', 'bye', 'bye bro', 'shut up', 'thats all', 'that is all', 'sleep mode', 'sleeping']);
 
 function normalizeSpoken(value) {
@@ -374,6 +378,11 @@ function normalizeSpoken(value) {
     .trim();
 }
 
+function isSleepPhrase(value) {
+  const text = normalizeSpoken(value);
+  return Boolean(text) && SLEEP_PATTERN.test(text);
+}
+
 function looksLikeCommand(value) {
   const text = String(value || '').trim();
   if (!text) return false;
@@ -383,13 +392,21 @@ function looksLikeCommand(value) {
 function matchWake(value) {
   const text = normalizeSpoken(value);
   if (!text) return { wake: false, sleep: false, remainder: '', commandText: '' };
-  if (SLEEP_PHRASES.has(text)) return { wake: false, sleep: true, remainder: '', commandText: '' };
+  if (SLEEP_PHRASES.has(text) || isSleepPhrase(text)) return { wake: false, sleep: true, remainder: '', commandText: '' };
   for (const phrase of WAKE_PHRASES) {
     if (text === phrase) return { wake: true, sleep: false, remainder: '', commandText: '' };
     if (text.startsWith(`${phrase} `)) {
       const remainder = text.slice(phrase.length + 1).trim();
       return { wake: true, sleep: false, remainder, commandText: looksLikeCommand(remainder) ? remainder : '' };
     }
+  }
+  // The tiny wake model spells “BRO” in many ways (bra, brah, broo, bros).
+  // Accept those shapes so the name never has to be said twice, while still
+  // rejecting ordinary words such as “brown” or “brotherhood”.
+  const [first, ...rest] = text.split(' ');
+  if (/^br[oah]{1,4}[hsd]?$/.test(first)) {
+    const remainder = rest.join(' ').trim();
+    return { wake: true, sleep: false, remainder, commandText: looksLikeCommand(remainder) ? remainder : '' };
   }
   return { wake: false, sleep: false, remainder: '', commandText: '' };
 }

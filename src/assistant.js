@@ -517,7 +517,7 @@ async function handleChat({ message, history = [], projects = [], settings, user
     return result;
   }
 
-  if (/^(?:stop\s+listening|sleep|go\s+to\s+sleep|go\s+quiet|goodbye|bye(?:\s+bro)?|that'?s\s+all)[.!]?$/i.test(commandText)) {
+  if (/^(?:stop\s+listening|(?:go\s+(?:to\s+)?)?sleep(?:\s+mode)?|sleeping|go\s+quiet|go\s+away|disappear|hide(?:\s+yourself)?|good\s?bye|bye(?:\s+bro)?|that'?s\s+all|thats\s+all)[.!]?$/i.test(commandText)) {
     result.reply = 'Okay, I’ll stop listening. Press Ctrl + Alt + B whenever you want to talk again.';
     return result;
   }
@@ -973,7 +973,7 @@ async function handleChat({ message, history = [], projects = [], settings, user
     if (completion.ok) { result.reply = completion.reply; return result; }
     result.reply = completion.reason === 'provider timed out'
       ? 'The configured AI provider took too long to answer. The local model may still be starting; please try again.'
-      : 'I could not reach the configured AI provider. You can still use local commands such as “list projects” or “open project NAME”.';
+      : 'My local model is not answering, so I can still run direct commands such as “open YouTube”, “open Notepad”, or “scroll down”. Start Ollama for open conversation.';
     return result;
   }
   result.reply = 'I did not recognize that request. Try “help”, “list projects”, “open https://example.com”, or “run PROFILE in PROJECT”.';

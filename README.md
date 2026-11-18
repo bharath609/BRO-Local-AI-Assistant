@@ -47,7 +47,9 @@ After a command finishes, BRO does not go deaf. It keeps the microphone open in 
 - **Say “BRO”** (or “hey BRO”, “brother”) — BRO answers “Yes — listening…” and captures your next command. You can also say them together: “BRO, open Telegram”.
 - **Press Ctrl + Alt + B** — starts listening immediately, no wake word needed.
 
-To stop hands-free listening say **“sleep”**, “go to sleep mode”, “disappear”, or “goodbye”, or press the **Sleep** button in the popup. The popup disappears right away, but BRO keeps the microphone open in wake-word mode — saying **“BRO”** (or pressing **Ctrl + Alt + B**) brings the popup straight back and starts listening. The microphone is released completely only when the popup window is closed with its **×** button. Set `BRO_WAKE_WORD=0` if you want the microphone to stay closed until you press the hotkey.
+The wake word is matched loosely on purpose: “bra”, “broo”, “bros”, “brah”, and similar sound-alikes all count. If you pause after saying it, BRO re-opens the listening window once instead of asking you to call it a second time.
+
+To stop hands-free listening say **“sleep”**, **“sleep mode”**, “go to sleep mode”, “go sleep”, “sleeping”, “disappear”, or “goodbye”, or press the **Sleep** button in the popup. The popup disappears right away, but BRO keeps the microphone open in wake-word mode — saying **“BRO”** (or pressing **Ctrl + Alt + B**) brings the popup straight back and starts listening. The microphone is released completely only when the popup window is closed with its **×** button. Set `BRO_WAKE_WORD=0` if you want the microphone to stay closed until you press the hotkey.
 
 After a command the popup stays on screen for **20 seconds**. If no new command arrives, it hides itself — but the microphone keeps listening for **“BRO”**, which brings the window straight back and starts listening. Tune the delay with `BRO_AUTO_HIDE_MS` (milliseconds).
 
@@ -69,6 +71,7 @@ Once a website is open, BRO treats what you say next as an action **on that site
 | `find lo-fi beats`, `look for python tutorial`, `look up lofi hip hop` | Opens the YouTube search results page instead. |
 | `watch strangers things` (after “open Netflix”) | Opens Netflix search results. |
 | `play the boys` (after “open prime video”) | Opens Prime Video search results. |
+| `scroll down`, `scroll up`, `scroll to the top`, `scroll to the bottom`, `page down` | Scrolls the page you opened. The browser keeps its maximized size — BRO aims the wheel at the page, so the window is never shrunk or minimized while scrolling. |
 
 `play <name>` and `play <name> on YouTube` also work without opening YouTube first: BRO looks up the top result and opens that video. The same search verbs work on Google, GitHub, Amazon, Spotify, Reddit, and Wikipedia. Real commands still win: `open Notepad`, `open Downloads`, or `open GitHub` are opened normally instead of becoming a search.
 
@@ -97,7 +100,7 @@ BRO remembers the last app, folder, terminal, website, or file it opened and und
 
 For a website, “that video”/“the page” refers to the browser window BRO opened; BRO brings that browser to the front. To play a specific video, name it: `play <video name>` finds the top YouTube result and opens it with autoplay (see *Following the site BRO opened* above).
 
-Every successful open also brings the new window to the foreground and re-asserts the BRO popup as topmost, so Settings, apps, folders, and browsers no longer appear behind the current window.
+Every successful open also brings the new window to the foreground and re-asserts the BRO popup as topmost, so Settings, apps, folders, and browsers no longer appear behind the current window. Apps and browsers open **already maximized** — Windows is launched with `/MAX`, and the default browser is started with `--start-maximized` — so there is no small window that grows a moment later.
 
 The wake check uses the small `ggml-tiny.en` model (about 0.5 s per check) and only runs when the room is actually loud enough to be speech, so idle room noise never reaches the recogniser. The first wake detection in a session warms that second model, which adds about a second once.
 
@@ -274,7 +277,7 @@ Execute if allowed / Ask for yes if needed → Outcome returned to user
 
 *Guardrails simplified – 93/93 tests pass, trusted mode default, commands execute directly without yes/no prompts.*
 
-Without a provider, BRO still handles the local command and workspace intents. To enable general AI replies, use **Provider** in the UI and configure an OpenAI-compatible endpoint. For a local Ollama model, use `http://127.0.0.1:11434/v1` and an installed model such as `llama3.2:3b`; local endpoints do not require an API key. For OpenAI, use `https://api.openai.com/v1`, choose the Responses API (or Auto), and enter the exact model available to your account. Settings are stored locally under `data/settings.json`, which is ignored by git. You can also set `BRO_AI_BASE_URL`, `BRO_AI_MODEL`, `BRO_AI_PROTOCOL`, and `BRO_AI_API_KEY` in the process environment before starting BRO. Never put the key in a chat message.
+Without a provider, BRO still handles the local command and workspace intents. To enable general AI replies, use **Provider** in the UI and configure an OpenAI-compatible endpoint. For a local Ollama model, use `http://127.0.0.1:11434/v1` and an installed model such as `llama3.2:3b`; local endpoints do not require an API key. If Ollama is installed but not running, BRO starts it automatically and retries the request once. For OpenAI, use `https://api.openai.com/v1`, choose the Responses API (or Auto), and enter the exact model available to your account. Settings are stored locally under `data/settings.json`, which is ignored by git. You can also set `BRO_AI_BASE_URL`, `BRO_AI_MODEL`, `BRO_AI_PROTOCOL`, and `BRO_AI_API_KEY` in the process environment before starting BRO. Never put the key in a chat message.
 
 BRO's standalone Node server does not automatically inherit the model selected in the OmniRush desktop chat. OmniRush's ChatGPT/managed model connection is available to the OmniRush desktop app itself; using that model from this separate local server requires an officially supplied OpenAI-compatible endpoint and credential. Do not guess an endpoint or copy desktop session tokens into BRO. The GPT-6.1 Sol preset uses `https://api.openai.com/v1`, model `gpt-6.1-sol`, and the OpenAI Responses API; it still requires an authorized API key and account access.
 

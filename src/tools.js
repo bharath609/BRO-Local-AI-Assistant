@@ -100,6 +100,12 @@ if ($handle -eq [IntPtr]::Zero) {
 // Windows that belong to BRO itself are never listed, matched, or closed.
 const BRO_PROCESSES = new Set(['electron.exe']);
 const BRO_WINDOW_TITLES = new Set(['bro voice', 'bro overlay', 'bro']);
+// Always-on-top helper widgets (dictation bars, input panels) are not pages and
+// never receive scrolling.
+const OVERLAY_PROCESSES = new Set([
+  'wispr flow.exe', 'textinputhost.exe', 'searchhost.exe', 'shellexperiencehost.exe',
+  'startmenuexperiencehost.exe', 'applicationframehost.exe',
+]);
 // Browser windows are closed tab-by-tab (Ctrl+W) and never force-killed, so a
 // spoken “close gmail” cannot take the whole browser and its other tabs with it.
 const BROWSER_PROCESSES = new Set([
@@ -124,8 +130,10 @@ using System.Text;
 using System.Runtime.InteropServices;
 public static class BroWindowsNative {
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int max);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
@@ -133,6 +141,7 @@ public static class BroWindowsNative {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
 }
 "@
@@ -145,6 +154,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $owners = @{}
 Get-Process | ForEach-Object { $owners[[int]$_.Id] = $_.ProcessName }
+$front = [BroWindowsNative]::GetForegroundWindow()
 $found = New-Object System.Collections.ArrayList
 $callback = [BroWindowsNative+EnumWindowsProc]{
   param([IntPtr]$hWnd, [IntPtr]$lParam)
@@ -157,7 +167,9 @@ $callback = [BroWindowsNative+EnumWindowsProc]{
       if ($title) {
         $owner = 0
         [void][BroWindowsNative]::GetWindowThreadProcessId($hWnd, [ref]$owner)
-        [void]$found.Add([pscustomobject]@{ hwnd = $hWnd.ToInt64(); pid = [int]$owner; process = [string]$owners[[int]$owner]; title = $title })
+        $rect = New-Object BroWindowsNative+RECT
+        [void][BroWindowsNative]::GetWindowRect($hWnd, [ref]$rect)
+        [void]$found.Add([pscustomobject]@{ hwnd = $hWnd.ToInt64(); pid = [int]$owner; process = [string]$owners[[int]$owner]; title = $title; width = [int]($rect.Right - $rect.Left); height = [int]($rect.Bottom - $rect.Top); foreground = ($hWnd -eq $front); minimized = [BroWindowsNative]::IsIconic($hWnd) })
       }
     }
   }
@@ -218,10 +230,45 @@ function parseWindowJson(output) {
       pid: Number(item.pid) || 0,
       process: normalizeProcessName(item.process),
       title: item.title.trim(),
+      width: Number(item.width) || 0,
+      height: Number(item.height) || 0,
+      foreground: Boolean(item.foreground),
+      minimized: Boolean(item.minimized),
     }));
 }
 
 let windowSnapshot = { at: 0, windows: [] };
+
+// The app or page window BRO opened most recently. Spoken follow-ups such as
+// “scroll down” act on it, because while BRO talks its own popup owns the
+// foreground and the browser is not technically “active”.
+let lastOpenedWindow = { hwnd: 0, at: 0, title: '', process: '' };
+
+function rememberOpenedWindow(win) {
+  if (!win || !win.hwnd) return;
+  lastOpenedWindow = { hwnd: Number(win.hwnd), at: Date.now(), title: win.title || '', process: win.process || '' };
+}
+
+// Watches for the window a launch just created. Uses the foreground flag and
+// then the newest handle, so a page opened in an already-running browser is
+// still found without snapshotting every window before the launch.
+function trackOpenedWindow({ browsersOnly = false } = {}) {
+  let attempt = 0;
+  const tick = () => {
+    attempt += 1;
+    let list = [];
+    try { list = listWindows({ force: true }); } catch { return; }
+    const candidates = browsersOnly ? list.filter((win) => BROWSER_PROCESSES.has(win.process)) : list;
+    if (!candidates.length) {
+      if (attempt < 6) setTimeout(tick, 500);
+      return;
+    }
+    const front = candidates.find((win) => win.foreground && !win.minimized);
+    const newest = candidates.reduce((best, win) => (win.hwnd > (best ? best.hwnd : 0) ? win : best), null);
+    rememberOpenedWindow(front || newest);
+  };
+  setTimeout(tick, 500);
+}
 
 function listWindows({ force = false, includeBro = false } = {}) {
   if (process.platform !== 'win32') return [];
@@ -387,9 +434,67 @@ function openTarget(target, kind) {
   return { opened: true, kind, target };
 }
 
+// Chromium browsers accept --start-maximized, which creates the window already
+// full screen. Opening the URL through `start` first made the browser paint a
+// small window and only then grow it, which looked like a “mini tab”.
+const CHROMIUM_BROWSERS = new Set(['chrome.exe', 'msedge.exe', 'brave.exe', 'vivaldi.exe', 'opera.exe', 'chromium.exe', 'arc.exe', 'librewolf.exe']);
+let defaultBrowserCache = { at: 0, info: null };
+
+function readRegistryValue(key, valueName) {
+  try {
+    const args = valueName ? ['query', key, '/v', valueName] : ['query', key, '/ve'];
+    const probe = spawnSync('reg.exe', args, { encoding: 'utf8', timeout: 4_000, windowsHide: true });
+    if (probe.status !== 0) return '';
+    const match = String(probe.stdout || '').match(/REG_SZ\s+(.+?)\s*$/m);
+    return match ? match[1].trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+// Finds the user's default browser executable so BRO can launch it maximized.
+function defaultBrowser() {
+  if (process.platform !== 'win32') return null;
+  if (defaultBrowserCache.info && Date.now() - defaultBrowserCache.at < 60_000) return defaultBrowserCache.info;
+  let info = null;
+  const progId = readRegistryValue('HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice', 'ProgId');
+  if (progId) {
+    const command = readRegistryValue(`HKCU\\Software\\Classes\\${progId}\\shell\\open\\command`, '');
+    const quoted = command.match(/"([^"]+\.exe)"/i);
+    const bare = command.match(/^([^\s]+\.exe)/i);
+    const exe = (quoted && quoted[1]) || (bare && bare[1]) || '';
+    if (exe && fs.existsSync(exe)) info = { exe, progId };
+  }
+  defaultBrowserCache = { at: Date.now(), info };
+  return info;
+}
+
+// Opens a URL directly in the default browser, already maximized, when the
+// browser supports it. Returns the browser name, or '' when the plain shell
+// route should be used instead.
+function launchBrowserMaximized(url) {
+  if (process.platform !== 'win32') return '';
+  const browser = defaultBrowser();
+  if (!browser) return '';
+  const name = path.basename(browser.exe).toLowerCase();
+  const args = CHROMIUM_BROWSERS.has(name) ? ['--start-maximized', '--new-window', url] : null;
+  if (!args) return '';
+  try {
+    const child = spawn(browser.exe, args, { detached: true, stdio: 'ignore', shell: false, windowsHide: true });
+    child.once('error', () => {});
+    child.unref();
+    return name;
+  } catch {
+    return '';
+  }
+}
+
 function openUrl(url) {
   const target = validateHttpUrl(url);
   recordOpenedSite(target);
+  const browser = launchBrowserMaximized(target);
+  trackOpenedWindow({ browsersOnly: true });
+  if (browser) return { opened: true, kind: 'url', target, browser, maximized: true };
   return openTarget(target, 'url');
 }
 
@@ -1004,7 +1109,11 @@ async function trackLaunched(entry, processName, before, beforeWindows) {
     for (const win of windows) {
       if (beforeWindows.has(win.hwnd)) continue;
       if (wanted && win.process !== wanted) continue;
-      if (!entry.windows.has(win.hwnd)) { entry.windows.set(win.hwnd, win); found = true; }
+      if (!entry.windows.has(win.hwnd)) {
+        entry.windows.set(win.hwnd, win);
+        found = true;
+        rememberOpenedWindow(win);
+      }
       if (win.pid) entry.pids.add(win.pid);
       if (win.process) entry.names.add(win.process);
     }
@@ -1048,11 +1157,11 @@ function launchShortcut(appPath, label, processName = '') {
   // path, so `start` is the wrong tool for them.
   const child = /^shell:/i.test(appPath)
     ? spawn('explorer.exe', [appPath], { detached: true, stdio: 'ignore', shell: false, windowsHide: true })
-    : spawn('cmd.exe', ['/d', '/c', 'start', '', appPath], { detached: true, stdio: 'ignore', shell: false, windowsHide: true });
+    : spawn('cmd.exe', ['/d', '/c', 'start', '/MAX', '', appPath], { detached: true, stdio: 'ignore', shell: false, windowsHide: true });
   child.once('error', () => {});
   child.unref();
 
-  // Register the app immediately (by name) so “close everything” knows about it
+  // Register the app immediately (by name) so "close everything" knows about it
   // even before the window watcher has matched anything.
   const primary = normalizeProcessName(processName) || shortcutTargetName(appPath);
   const key = primary || normalizeAppName(label);
@@ -1249,7 +1358,7 @@ async function closeAllWindows() {
 // Brings back, minimizes, maximizes, or restores a window by name (or — for a
 // website BRO opened — the topmost browser window). This is what powers
 // references like “check it once”, “bring that back”, or “minimize it”.
-const WINDOW_CONTROL_COMMANDS = Object.freeze({ focus: 9, restore: 9, minimize: 6, maximize: 3 });
+const WINDOW_CONTROL_COMMANDS = Object.freeze({ restore: 9, minimize: 6, maximize: 3 });
 
 function controlWindow(target, mode = 'focus') {
   if (process.platform !== 'win32') throw new ToolError('Window control is only available on Windows.');
@@ -1269,7 +1378,14 @@ function controlWindow(target, mode = 'focus') {
     throw new ToolError(`I could not find the window for “${label || 'that'}”. It may already be closed.`);
   }
 
-  const focus = wantedMode === 'focus' || wantedMode === 'restore';
+  // “focus” must never resize: SW_RESTORE (9) un-maximizes a maximized window,
+  // which is what made “scroll down” shrink the page before scrolling it. Only
+  // a minimized window is restored; everything else keeps its current size.
+  const focus = wantedMode === 'focus' || wantedMode === 'restore' || wantedMode === 'maximize';
+  const showWindow = wantedMode === 'focus'
+    ? `if ([BroWindowControl]::IsIconic($handle)) { [void][BroWindowControl]::ShowWindowAsync($handle, 9) }
+else { [void][BroWindowControl]::ShowWindowAsync($handle, 5) }`
+    : `[void][BroWindowControl]::ShowWindowAsync($handle, ${command})`;
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type @"
@@ -1279,6 +1395,7 @@ public static class BroWindowControl {
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
@@ -1286,7 +1403,7 @@ public static class BroWindowControl {
 }
 "@
 $handle = [IntPtr]${Number(win.hwnd)}
-[void][BroWindowControl]::ShowWindowAsync($handle, ${command})
+${showWindow}
 ${focus ? `
 $foreground = [BroWindowControl]::GetForegroundWindow()
 $foregroundThread = [BroWindowControl]::GetWindowThreadProcessId($foreground, [IntPtr]::Zero)
@@ -1299,6 +1416,7 @@ Start-Sleep -Milliseconds 120` : ''}
 [Console]::WriteLine('BRO_WINDOW_CONTROL_OK')
 `;
   runPowerShell(script, 8_000);
+  if (wantedMode === 'focus' || wantedMode === 'maximize') rememberOpenedWindow(win);
   return {
     label: win.title || win.process.replace(/\.exe$/, ''),
     window: win.title,
@@ -1600,12 +1718,25 @@ public static class BroScrollNative {
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, int data, UIntPtr extra);
 }
 "@
-$handle = [BroScrollNative]::GetForegroundWindow()
+# Prefer the window BRO resolved for the command. Falling back to the foreground
+# window would scroll BRO's own popup, because BRO is in front while it talks.
+$handle = [IntPtr]::Zero
+if ($env:BRO_SCROLL_HWND) { $handle = [IntPtr][long]$env:BRO_SCROLL_HWND }
+if ($handle -eq [IntPtr]::Zero) { $handle = [BroScrollNative]::GetForegroundWindow() }
+if ($handle -eq [IntPtr]::Zero) { [Console]::WriteLine('BRO_SCROLL_NO_WINDOW'); exit 0 }
+# Restoring is only for a window the user really minimized; a maximized window
+# stays maximized, so scrolling never shrinks the page.
+if ([BroScrollNative]::IsIconic($handle)) {
+  [void][BroScrollNative]::ShowWindowAsync($handle, 9)
+  Start-Sleep -Milliseconds 250
+}
 $rect = New-Object BroScrollNative+RECT
 [void][BroScrollNative]::GetWindowRect($handle, [ref]$rect)
 $origin = New-Object BroScrollNative+POINT
@@ -1627,6 +1758,25 @@ for ($i = 0; $i -lt $notches; $i++) {
 [Console]::WriteLine('BRO_SCROLL_OK')
 `;
 
+// Picks the window the user means when they say “scroll down”. Ranked: the real
+// window in front (BRO's popup and always-on-top helper widgets are ignored),
+// then the page or app BRO just opened, then the front-most ordinary window.
+function scrollTargetWindow() {
+  if (process.platform !== 'win32') return null;
+  let windows = [];
+  try { windows = listWindows({ force: true }); } catch { return null; }
+  const usable = windows.filter((win) => {
+    if (SHELL_WINDOW_TITLES.has(normalizeWindowText(win.title))) return false;
+    if (OVERLAY_PROCESSES.has(win.process)) return false;
+    return (win.width || 0) >= 320 && (win.height || 0) >= 240;
+  });
+  const front = usable.find((win) => win.foreground && !win.minimized);
+  if (front) return front;
+  const remembered = usable.find((win) => win.hwnd === lastOpenedWindow.hwnd);
+  if (remembered) return remembered;
+  return usable[0] || null;
+}
+
 // One wheel notch is 120 units. A positive vertical delta scrolls up (the
 // content moves down), so "down" must be negative — the earlier implementation
 // had this backwards. Horizontal scrolling uses MOUSEEVENTF_HWHEEL.
@@ -1637,13 +1787,17 @@ function scrollActiveWindow(direction = 'down', amount = 0) {
   const notches = Math.max(1, Math.min(30, Math.round(Number(amount) || fallback)));
   const horizontal = dir === 'left' || dir === 'right';
   const forward = dir === 'up' || dir === 'right';
-  const probe = runPowerShell(SCROLL_SCRIPT, 10_000, {
+  const target = scrollTargetWindow();
+  const probe = runPowerShell(SCROLL_SCRIPT, 12_000, {
     BRO_SCROLL_FLAGS: horizontal ? '4096' : '2048',
     BRO_SCROLL_DELTA: String(forward ? 120 : -120),
     BRO_SCROLL_NOTCHES: String(notches),
+    BRO_SCROLL_HWND: target ? String(target.hwnd) : '',
   });
-  if (!String(probe.stdout || '').includes('BRO_SCROLL_OK')) throw new ToolError('Windows did not scroll the active window.');
-  return { direction: dir, notches };
+  const stdout = String(probe.stdout || '');
+  if (stdout.includes('BRO_SCROLL_NO_WINDOW')) throw new ToolError('I could not find a window to scroll.');
+  if (!stdout.includes('BRO_SCROLL_OK')) throw new ToolError('Windows did not scroll the active window.');
+  return { direction: dir, notches, window: target ? target.title : '' };
 }
 
 const SCREENSHOT_SCRIPT = String.raw`

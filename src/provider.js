@@ -1,3 +1,7 @@
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+
 const DEFAULT_BASE_URL = '';
 const DEFAULT_MODEL = 'omnirush/gpt-6-astra';
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -49,9 +53,7 @@ function chatText(payload) {
   return typeof content === 'string' ? content.trim() : '';
 }
 
-async function chatCompletion(settings, messages) {
-  const info = providerInfo(settings);
-  if (!info.configured) return { ok: false, reason: 'unconfigured' };
+async function requestChat(settings, info, messages) {
   const controller = new AbortController();
   const timeoutMs = Number(process.env.BRO_AI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
   const timer = setTimeout(() => controller.abort(), Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS);
@@ -75,10 +77,76 @@ async function chatCompletion(settings, messages) {
     if (!content) return { ok: false, reason: 'provider returned no reply' };
     return { ok: true, reply: content };
   } catch (error) {
-    return { ok: false, reason: error && error.name === 'AbortError' ? 'provider timed out' : 'provider request failed' };
+    const aborted = error && error.name === 'AbortError';
+    return { ok: false, reason: aborted ? 'provider timed out' : 'provider request failed', network: !aborted };
   } finally {
     clearTimeout(timer);
   }
+}
+
+const OLLAMA_PORT = '11434';
+let ollamaAttempt = { at: 0, promise: null };
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function findOllama() {
+  const candidates = [];
+  if (process.env.LOCALAPPDATA) candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'Ollama', 'ollama.exe'));
+  if (process.env.PROGRAMFILES) candidates.push(path.join(process.env.PROGRAMFILES, 'Ollama', 'ollama.exe'));
+  if (process.env['PROGRAMFILES(X86)']) candidates.push(path.join(process.env['PROGRAMFILES(X86)'], 'Ollama', 'ollama.exe'));
+  return candidates.find((candidate) => {
+    try { return fs.existsSync(candidate); } catch { return false; }
+  }) || '';
+}
+
+async function ollamaResponding(base) {
+  try {
+    const response = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(1_200) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// The local model is the most common reason a spoken sentence gets “I could not
+// reach the configured AI provider”: Ollama was closed, or the PC just booted.
+// Start it once and retry, so the user never has to open a terminal for it.
+async function startLocalRuntime(baseUrl) {
+  let port = '';
+  try { port = new URL(baseUrl).port; } catch { return false; }
+  if (port !== OLLAMA_PORT) return false;
+  if (ollamaAttempt.promise && Date.now() - ollamaAttempt.at < 60_000) return ollamaAttempt.promise;
+  const base = baseUrl.replace(/\/v1\/?$/, '');
+  const exe = findOllama();
+  if (!exe) return false;
+  const promise = (async () => {
+    try {
+      const child = spawn(exe, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true, shell: false });
+      child.once('error', () => {});
+      child.unref();
+    } catch {
+      return false;
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await wait(400);
+      if (await ollamaResponding(base)) return true;
+    }
+    return false;
+  })();
+  ollamaAttempt = { at: Date.now(), promise };
+  return promise;
+}
+
+async function chatCompletion(settings, messages) {
+  const info = providerInfo(settings);
+  if (!info.configured) return { ok: false, reason: 'unconfigured' };
+  let result = await requestChat(settings, info, messages);
+  if (!result.ok && result.network && info.local) {
+    if (await startLocalRuntime(info.baseUrl)) result = await requestChat(settings, info, messages);
+  }
+  return result.ok ? { ok: true, reply: result.reply } : { ok: false, reason: result.reason };
 }
 
 module.exports = {

@@ -16,13 +16,13 @@
   // Commands that put BRO to sleep: the popup disappears, but the microphone
   // keeps watching for “BRO” so saying it (or pressing Ctrl + Alt + B) brings
   // the popup straight back.
-  const SLEEP_COMMAND = /^(?:stop\s+listening|sleep(?:\s+(?:mode|now|bro))?|go\s+to\s+sleep(?:\s+(?:mode|now))?|go\s+quiet|go\s+away|disappear|hide(?:\s+yourself)?|goodbye|bye(?:\s+bro)?|that(?:'?s|\s+is)\s+all)[.!]?$/i;
+  const SLEEP_COMMAND = /^(?:stop\s+listening|(?:go\s+(?:to\s+)?)?sleep(?:\s+(?:mode|now|bro))?|sleeping|go\s+quiet|go\s+away|disappear|hide(?:\s+yourself)?|good\s?bye|bye(?:\s+bro)?|that(?:'?s|\s+is)\s+all)[.!]?$/i;
   let hideTimer = null;
 
   // phase: idle -> awake -> listening -> transcribing -> working -> idle
   //   idle    microphone closed, waiting for the hotkey
   //   awake   microphone open, listening only for the “BRO” wake word
-  const state = { phase: 'idle', mic: null, micStarting: null, engine: null, context: {}, debug: false, wake: true, lastWakeCheckAt: 0, lastWatchClipAt: 0, followUp: false, followUpDeadline: 0, followUpToken: 0 };
+  const state = { phase: 'idle', mic: null, micStarting: null, engine: null, context: {}, debug: false, wake: true, lastWakeCheckAt: 0, lastWatchClipAt: 0, followUp: false, followUpDeadline: 0, followUpToken: 0, retryCapture: false };
   let heartbeatTimer = null;
   const debugVoice = (message) => { if (state.debug) console.log(message); };
   const els = {
@@ -354,6 +354,7 @@
       if (result.wake) {
         console.log(`BRO wake word detected in ${result.ms}ms (${String(result.text || '').length} chars)`);
         debugVoice(`BRO wake transcript: ${result.text}`);
+        state.retryCapture = false;
         cancelAutoHide();
         showWindow();
         if (result.commandText) { await runCommandText(result.commandText); return; }
@@ -405,6 +406,17 @@
     renderUi();
     console.log(`BRO voice clip ${clip.durationMs}ms reason=${clip.reason} peak=${clip.peak}`);
     if (clip.reason === 'no-speech' || clip.durationMs < 250) {
+      // People often need a beat after saying “BRO”. Re-open the listening
+      // window once instead of making them call the name a second time.
+      if (state.wake && !state.retryCapture) {
+        state.retryCapture = true;
+        state.phase = 'idle';
+        renderUi();
+        setVoiceStatus('I’m here — go ahead.');
+        await captureCommand();
+        state.retryCapture = false;
+        return;
+      }
       const quiet = clip.peak < 0.01;
       setVoiceStatus(quiet
         ? 'I did not hear anything. Check that your microphone is not muted in Windows, then try again.'
@@ -518,7 +530,7 @@
   function micPressed() {
     cancelAutoHide();
     showWindow();
-    if (state.phase === 'idle' || state.phase === 'awake') { captureCommand(); return; }
+    if (state.phase === 'idle' || state.phase === 'awake') { state.retryCapture = false; captureCommand(); return; }
     if (state.phase === 'listening' && state.mic) state.mic.stopCapture('manual');
   }
 
@@ -546,6 +558,7 @@
       cancelAutoHide();
       showWindow();
       if (state.phase === 'working' || state.phase === 'transcribing') return;
+      state.retryCapture = false;
       if (state.phase === 'awake') { captureCommand(); return; }
       if (state.phase !== 'idle') return;
       state.wake = true;
