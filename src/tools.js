@@ -1,4 +1,4 @@
-const path = require('node:path');
+﻿const path = require('node:path');
 const fs = require('node:fs');
 const { spawn, spawnSync } = require('node:child_process');
 
@@ -107,7 +107,7 @@ const OVERLAY_PROCESSES = new Set([
   'startmenuexperiencehost.exe', 'applicationframehost.exe',
 ]);
 // Browser windows are closed tab-by-tab (Ctrl+W) and never force-killed, so a
-// spoken “close gmail” cannot take the whole browser and its other tabs with it.
+// spoken â€œclose gmailâ€ cannot take the whole browser and its other tabs with it.
 const BROWSER_PROCESSES = new Set([
   'chrome.exe', 'msedge.exe', 'firefox.exe', 'brave.exe', 'opera.exe', 'vivaldi.exe',
   'chromium.exe', 'arc.exe', 'waterfox.exe', 'librewolf.exe',
@@ -148,7 +148,7 @@ public static class BroWindowsNative {
 `;
 
 // Enumerates every visible top-level window with its owning process, so BRO can
-// close “anything that appears on screen” by title instead of guessing.
+// close â€œanything that appears on screenâ€ by title instead of guessing.
 const LIST_WINDOWS_SCRIPT = `${WINDOW_NATIVE}
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
@@ -204,10 +204,49 @@ function runPowerShell(script, timeout = 8_000, extraEnv = null) {
   });
 }
 
+// Same command, but without spawnSync. PowerShell takes a few hundred
+// milliseconds to start, and spawnSync stops the whole Node process (including
+// the HTTP server) for that whole time. Anything that runs after a command has
+// already answered â€” window tracking, focus, maximizing â€” must use this instead.
+function runPowerShellAsync(script, timeout = 8_000, extraEnv = null) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let child;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ stdout, stderr });
+    };
+    const timer = setTimeout(() => {
+      try { if (child) child.kill(); } catch { /* already gone */ }
+      finish();
+    }, timeout);
+    try {
+      child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+        windowsHide: true,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+      });
+    } catch {
+      clearTimeout(timer);
+      resolve({ stdout: '', stderr: '' });
+      return;
+    }
+    if (child.stdout) child.stdout.on('data', (chunk) => { stdout += chunk; });
+    if (child.stderr) child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', finish);
+    child.once('close', finish);
+  });
+}
+
 function normalizeWindowText(value) {
   return String(value || '')
     .toLowerCase()
-    .replace(/['’]/g, '')
+    .replace(/['â€™]/g, '')
     .replace(/\+/g, ' plus ')
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -240,8 +279,8 @@ function parseWindowJson(output) {
 let windowSnapshot = { at: 0, windows: [] };
 
 // The app or page window BRO opened most recently. Spoken follow-ups such as
-// “scroll down” act on it, because while BRO talks its own popup owns the
-// foreground and the browser is not technically “active”.
+// â€œscroll downâ€ act on it, because while BRO talks its own popup owns the
+// foreground and the browser is not technically â€œactiveâ€.
 let lastOpenedWindow = { hwnd: 0, at: 0, title: '', process: '' };
 
 function rememberOpenedWindow(win) {
@@ -254,10 +293,10 @@ function rememberOpenedWindow(win) {
 // still found without snapshotting every window before the launch.
 function trackOpenedWindow({ browsersOnly = false } = {}) {
   let attempt = 0;
-  const tick = () => {
+  const tick = async () => {
     attempt += 1;
     let list = [];
-    try { list = listWindows({ force: true }); } catch { return; }
+    try { list = await listWindowsAsync({ force: true }); } catch { return; }
     const candidates = browsersOnly ? list.filter((win) => BROWSER_PROCESSES.has(win.process)) : list;
     if (!candidates.length) {
       if (attempt < 6) setTimeout(tick, 500);
@@ -279,6 +318,33 @@ function listWindows({ force = false, includeBro = false } = {}) {
     windowSnapshot = { at: Date.now(), windows };
   }
   return includeBro ? windows : windows.filter((win) => !isBroWindow(win));
+}
+
+// Non-blocking twin of listWindows, for background work only.
+async function listWindowsAsync({ force = false, includeBro = false } = {}) {
+  if (process.platform !== 'win32') return [];
+  const cached = !force && windowSnapshot.windows.length && Date.now() - windowSnapshot.at < 700;
+  let windows = windowSnapshot.windows;
+  if (!cached) {
+    const result = await runPowerShellAsync(LIST_WINDOWS_SCRIPT, 9_000);
+    windows = parseWindowJson(result.stdout);
+    windowSnapshot = { at: Date.now(), windows };
+  }
+  return includeBro ? windows : windows.filter((win) => !isBroWindow(win));
+}
+
+function matchWindows(list, query, options = {}) {
+  if (!String(query || '').trim()) return [];
+  return list.filter((win) => {
+    if (options.browsersOnly && !BROWSER_PROCESSES.has(win.process)) return false;
+    if (!options.includeShell && SHELL_WINDOW_TITLES.has(normalizeWindowText(win.title))) return false;
+    if (windowMatchesText(win.title, query)) return true;
+    return Boolean(win.process) && windowMatchesText(win.process.replace(/\.exe$/, ''), query);
+  });
+}
+
+async function findWindowsAsync(query, options = {}) {
+  return matchWindows(await listWindowsAsync({ force: true }), query, options);
 }
 
 // True when a spoken name describes this window: either the whole phrase
@@ -436,7 +502,7 @@ function openTarget(target, kind) {
 
 // Chromium browsers accept --start-maximized, which creates the window already
 // full screen. Opening the URL through `start` first made the browser paint a
-// small window and only then grow it, which looked like a “mini tab”.
+// small window and only then grow it, which looked like a â€œmini tabâ€.
 const CHROMIUM_BROWSERS = new Set(['chrome.exe', 'msedge.exe', 'brave.exe', 'vivaldi.exe', 'opera.exe', 'chromium.exe', 'arc.exe', 'librewolf.exe']);
 let defaultBrowserCache = { at: 0, info: null };
 
@@ -503,7 +569,7 @@ function openPath(root, requestedPath = root) {
 }
 
 // ---- YouTube playback ------------------------------------------------------
-// “play <video name>” should actually play the top result instead of leaving
+// â€œplay <video name>â€ should actually play the top result instead of leaving
 // you on a search page. YouTube's own result page is fetched and the first
 // real video is opened directly. Any network problem falls back to search.
 
@@ -550,7 +616,7 @@ async function findYouTubeVideo(query, { timeoutMs = 6000 } = {}) {
 }
 
 // ---- User file search ------------------------------------------------------
-// “open report.pdf” or, while a folder is open, “open my resume”: BRO looks in
+// â€œopen report.pdfâ€ or, while a folder is open, â€œopen my resumeâ€: BRO looks in
 // the user's own folders only. Paths supplied by the model or by the caller
 // are never trusted; openUserFile re-validates every path against these roots.
 
@@ -679,7 +745,7 @@ function createUserFolder(name, folder = '') {
   if (!base) throw new ToolError('I could not find that folder in your user folders.');
   const target = path.join(base, safe);
   if (!isWithinRoot(base, target) || target === base) throw new ToolError('That folder name is not allowed.');
-  if (fs.existsSync(target)) throw new ToolError(`“${safe}” already exists in ${path.basename(base)}.`);
+  if (fs.existsSync(target)) throw new ToolError(`â€œ${safe}â€ already exists in ${path.basename(base)}.`);
   fs.mkdirSync(target, { recursive: false });
   return { created: true, name: safe, path: target, folder: path.basename(base) };
 }
@@ -702,7 +768,7 @@ function renameUserFile(filePath, newName) {
   const finalName = hasExtension ? safe : `${safe}${path.extname(canonical)}`;
   const target = path.join(directory, finalName);
   if (target === canonical) throw new ToolError('That is already the file name.');
-  if (fs.existsSync(target)) throw new ToolError(`“${finalName}” already exists in that folder.`);
+  if (fs.existsSync(target)) throw new ToolError(`â€œ${finalName}â€ already exists in that folder.`);
   fs.renameSync(canonical, target);
   return { renamed: true, from: canonical, path: target, name: finalName };
 }
@@ -743,7 +809,7 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 `;
   const probe = runPowerShell(script, 15_000, { BRO_FILE_PATH: canonical });
   if (!String(probe.stdout || '').includes('BRO_RECYCLE_OK')) {
-    throw new ToolError(`Windows could not move “${path.basename(canonical)}” to the Recycle Bin.`);
+    throw new ToolError(`Windows could not move â€œ${path.basename(canonical)}â€ to the Recycle Bin.`);
   }
   return { recycled: true, name: path.basename(canonical), path: canonical };
 }
@@ -796,7 +862,7 @@ function activateBro() {
 function openWindowsTarget(target) {
   if (process.platform !== 'win32') throw new ToolError('Windows desktop targets are only available on Windows.');
   const descriptor = resolveWindowsTarget(target);
-  // .msc and .cpl tools (Device Manager, Services, …) are documents, not
+  // .msc and .cpl tools (Device Manager, Services, â€¦) are documents, not
   // executables, so hand them to the shell with `start` instead of spawning
   // them directly (spawning a .msc fails with EFTYPE).
   const spawnArgs = ['/d', '/c', 'start', '', descriptor.command, ...descriptor.args];
@@ -825,7 +891,7 @@ const START_MENU_ROOTS = [
   path.join(process.env.PROGRAMDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
 ];
 // Shortcuts and executables the user keeps on the Desktop, plus apps installed
-// per-user (VS Code, Zoom, Teams, …) that may not appear in the Start Menu.
+// per-user (VS Code, Zoom, Teams, â€¦) that may not appear in the Start Menu.
 const DESKTOP_APP_ROOTS = [
   path.join(process.env.USERPROFILE || '', 'Desktop'),
   path.join(process.env.OneDrive || '', 'Desktop'),
@@ -841,7 +907,7 @@ const EXE_BLOCKLIST = /^(?:unins\d*|setup|install|update|updater|helper|crashpad
 let startMenuCache = { at: 0, apps: [] };
 let startAppsCache = { at: 0, apps: [] };
 
-// Store/MSIX apps (ChatGPT, Claude, WhatsApp, …) have no Start Menu .lnk file.
+// Store/MSIX apps (ChatGPT, Claude, WhatsApp, â€¦) have no Start Menu .lnk file.
 // Get-StartApps lists every Start-visible app with the AppID needed to launch it.
 function scanStartApps(force = false) {
   if (process.platform !== 'win32') return [];
@@ -871,7 +937,7 @@ function normalizeAppName(value) {
   return String(value || '')
     .toLowerCase()
     .replace(/\.lnk$/i, '')
-    // Keep “Notepad++” distinct from “Notepad” (and “VS Code” from “VSCode”).
+    // Keep â€œNotepad++â€ distinct from â€œNotepadâ€ (and â€œVS Codeâ€ from â€œVSCodeâ€).
     .replace(/\+/g, ' plus ')
     .replace(/&/g, ' and ')
     .replace(/[^a-z0-9]+/g, ' ')
@@ -881,7 +947,10 @@ function normalizeAppName(value) {
 
 function scanStartMenu(force = false) {
   if (process.platform !== 'win32') return [];
-  if (!force && startMenuCache.apps.length && Date.now() - startMenuCache.at < 5 * 60_000) return startMenuCache.apps;
+  // The scan walks both Start Menu trees and several install folders, which costs
+  // about two seconds cold. Keep the result for half an hour so only the very
+  // first app name after a start pays for it.
+  if (!force && startMenuCache.apps.length && Date.now() - startMenuCache.at < 30 * 60_000) return startMenuCache.apps;
   const apps = [];
   const seen = new Set();
   const addApp = (name, fullPath) => {
@@ -977,7 +1046,7 @@ function scoreAppName(app, wanted) {
       const tokens = query.split(' ').filter(Boolean);
       const appTokens = new Set(app.normalized.split(' '));
       if (tokens.length && tokens.every((token) => appTokens.has(token))) best = Math.max(best, 60);
-      // “SQLiteStudio” spoken as “sqlite studio”, or “OpenCode” as “open code”.
+      // â€œSQLiteStudioâ€ spoken as â€œsqlite studioâ€, or â€œOpenCodeâ€ as â€œopen codeâ€.
       const compactQuery = query.replace(/\s+/g, '');
       const compactApp = app.normalized.replace(/\s+/g, '');
       if (compactQuery && compactQuery === compactApp) best = Math.max(best, 95);
@@ -987,8 +1056,11 @@ function scoreAppName(app, wanted) {
   return best;
 }
 
-function findInstalledApp(names) {
+function findInstalledApp(names, options = {}) {
   if (process.platform !== 'win32') return null;
+  // Callers that are only guessing (a bare word that might be an app name) can
+  // ask for the cached list only, so a cold cache never delays a command.
+  if (options.cachedOnly && !startMenuCache.apps.length) return null;
   const apps = scanStartMenu();
   const wanted = (Array.isArray(names) ? names : [names]).filter(Boolean);
   let best = null;
@@ -1001,6 +1073,16 @@ function findInstalledApp(names) {
     if (bestScore === 100) break outer;
   }
   return best ? { name: best.name, path: best.path, score: bestScore } : null;
+}
+
+// Builds the Start Menu list ahead of time so the first "open Chrome" of a
+// session is instant instead of waiting on a two-second folder walk.
+function warmInstalledApps() {
+  try {
+    return scanStartMenu().length;
+  } catch {
+    return 0;
+  }
 }
 
 function catalogApp(id) {
@@ -1031,10 +1113,10 @@ const TRACKING_IGNORE = new Set([
 ]);
 
 // Apps BRO launched in this session. Each entry remembers the image names, the
-// real PIDs, and the actual window handles, so “close” stays precise even for
+// real PIDs, and the actual window handles, so â€œcloseâ€ stays precise even for
 // Store apps whose process name is not in the catalog.
 const OPENED_APPS = new Map();
-// Web pages BRO opened in a browser. “close everything” closes these tabs too.
+// Web pages BRO opened in a browser. â€œclose everythingâ€ closes these tabs too.
 const OPENED_SITES = [];
 const shortcutTargetCache = new Map();
 
@@ -1100,7 +1182,7 @@ function snapshotProcesses() {
   return map;
 }
 
-// Watches for the window and processes a launch actually created, so “close”
+// Watches for the window and processes a launch actually created, so â€œcloseâ€
 // stays precise even when the window belongs to a differently named process.
 async function trackLaunched(entry, processName, before, beforeWindows) {
   const wanted = normalizeProcessName(processName);
@@ -1182,7 +1264,7 @@ function openCatalogApp(id) {
 
 function openStartMenuApp(name) {
   const installed = findInstalledApp(name);
-  if (!installed) throw new ToolError(`I could not find an installed app named “${name}”.`);
+  if (!installed) throw new ToolError(`I could not find an installed app named â€œ${name}â€.`);
   return launchShortcut(installed.path, installed.name);
 }
 
@@ -1246,7 +1328,7 @@ function findBrowserTabs(hints) {
   });
 }
 
-// Closes the browser tab that shows a website. “close gmail” closes the Gmail
+// Closes the browser tab that shows a website. â€œclose gmailâ€ closes the Gmail
 // tab, not the whole browser; if the tab cannot be targeted, its window is
 // asked to close instead.
 async function closeWebsite(name, options = {}) {
@@ -1293,7 +1375,7 @@ async function closeWebsite(name, options = {}) {
   return result;
 }
 
-// “close this tab”: the foreground browser window loses its active tab.
+// â€œclose this tabâ€: the foreground browser window loses its active tab.
 async function closeForegroundTab(win) {
   const mode = closeBrowserTab(win.hwnd);
   await delay(700);
@@ -1303,7 +1385,7 @@ async function closeForegroundTab(win) {
   return { closedWindows: closed ? [win] : [], remainingWindows: closed ? [] : [win], closedPids: [] };
 }
 
-// “close this window” / “close the window” / plain “close”.
+// â€œclose this windowâ€ / â€œclose the windowâ€ / plain â€œcloseâ€.
 async function closeForegroundWindow(options = {}) {
   if (process.platform !== 'win32') throw new ToolError('Closing the active window is only available on Windows.');
   const probe = runPowerShell(FOREGROUND_WINDOW_SCRIPT, 6_000);
@@ -1329,7 +1411,7 @@ async function closeForegroundWindow(options = {}) {
   };
 }
 
-// “close all windows”: every visible window except Windows itself and BRO.
+// â€œclose all windowsâ€: every visible window except Windows itself and BRO.
 async function closeAllWindows() {
   if (process.platform !== 'win32') throw new ToolError('Closing windows is only available on Windows.');
   const windows = listWindows({ force: true }).filter((win) => (
@@ -1355,38 +1437,25 @@ async function closeAllWindows() {
   return result;
 }
 
-// Brings back, minimizes, maximizes, or restores a window by name (or — for a
-// website BRO opened — the topmost browser window). This is what powers
-// references like “check it once”, “bring that back”, or “minimize it”.
+// Brings back, minimizes, maximizes, or restores a window by name (or â€” for a
+// website BRO opened â€” the topmost browser window). This is what powers
+// references like â€œcheck it onceâ€, â€œbring that backâ€, or â€œminimize itâ€.
 const WINDOW_CONTROL_COMMANDS = Object.freeze({ restore: 9, minimize: 6, maximize: 3 });
 
-function controlWindow(target, mode = 'focus') {
-  if (process.platform !== 'win32') throw new ToolError('Window control is only available on Windows.');
-  const wanted = typeof target === 'string' ? { label: target } : (target || {});
-  const label = String(wanted.label || wanted.name || wanted.id || '').trim();
+// Builds the PowerShell that focuses/restores/maximizes one already-resolved
+// window. Shared by the blocking and non-blocking callers.
+function windowControlScript(win, mode = 'focus') {
   const wantedMode = String(mode || 'focus').toLowerCase();
   const command = WINDOW_CONTROL_COMMANDS[wantedMode] || 9;
-
-  let matches = label ? findWindows(label, { includeShell: Boolean(wanted.includeShell) }) : [];
-  if (!matches.length && (wanted.kind === 'site' || wanted.kind === 'website')) {
-    // The page title changes once the user clicks into it, so fall back to the
-    // browser window that is currently in front.
-    matches = listWindows({ force: true }).filter((win) => BROWSER_PROCESSES.has(win.process));
-  }
-  const win = matches[0];
-  if (!win) {
-    throw new ToolError(`I could not find the window for “${label || 'that'}”. It may already be closed.`);
-  }
-
-  // “focus” must never resize: SW_RESTORE (9) un-maximizes a maximized window,
-  // which is what made “scroll down” shrink the page before scrolling it. Only
+  // "focus" must never resize: SW_RESTORE (9) un-maximizes a maximized window,
+  // which is what made "scroll down" shrink the page before scrolling it. Only
   // a minimized window is restored; everything else keeps its current size.
   const focus = wantedMode === 'focus' || wantedMode === 'restore' || wantedMode === 'maximize';
   const showWindow = wantedMode === 'focus'
     ? `if ([BroWindowControl]::IsIconic($handle)) { [void][BroWindowControl]::ShowWindowAsync($handle, 9) }
 else { [void][BroWindowControl]::ShowWindowAsync($handle, 5) }`
     : `[void][BroWindowControl]::ShowWindowAsync($handle, ${command})`;
-  const script = String.raw`
+  return String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type @"
 using System;
@@ -1415,7 +1484,9 @@ $targetThread = [BroWindowControl]::GetWindowThreadProcessId($handle, [IntPtr]::
 Start-Sleep -Milliseconds 120` : ''}
 [Console]::WriteLine('BRO_WINDOW_CONTROL_OK')
 `;
-  runPowerShell(script, 8_000);
+}
+
+function controlWindowResult(win, wantedMode) {
   if (wantedMode === 'focus' || wantedMode === 'maximize') rememberOpenedWindow(win);
   return {
     label: win.title || win.process.replace(/\.exe$/, ''),
@@ -1425,6 +1496,49 @@ Start-Sleep -Milliseconds 120` : ''}
     mode: wantedMode,
     controlled: true,
   };
+}
+
+function controlWindow(target, mode = 'focus') {
+  if (process.platform !== 'win32') throw new ToolError('Window control is only available on Windows.');
+  const wanted = typeof target === 'string' ? { label: target } : (target || {});
+  const label = String(wanted.label || wanted.name || wanted.id || '').trim();
+  const wantedMode = String(mode || 'focus').toLowerCase();
+
+  let matches = label ? findWindows(label, { includeShell: Boolean(wanted.includeShell) }) : [];
+  if (!matches.length && (wanted.kind === 'site' || wanted.kind === 'website')) {
+    // The page title changes once the user clicks into it, so fall back to the
+    // browser window that is currently in front.
+    matches = listWindows({ force: true }).filter((win) => BROWSER_PROCESSES.has(win.process));
+  }
+  const win = matches[0];
+  if (!win) {
+    throw new ToolError(`I could not find the window for "${label || 'that'}". It may already be closed.`);
+  }
+
+  runPowerShell(windowControlScript(win, wantedMode), 8_000);
+  return controlWindowResult(win, wantedMode);
+}
+
+// Non-blocking twin of controlWindow, used by background follow-ups so a
+// PowerShell start never stalls the HTTP server.
+async function controlWindowAsync(target, mode = 'focus') {
+  if (process.platform !== 'win32') throw new ToolError('Window control is only available on Windows.');
+  const wanted = typeof target === 'string' ? { label: target } : (target || {});
+  const label = String(wanted.label || wanted.name || wanted.id || '').trim();
+  const wantedMode = String(mode || 'focus').toLowerCase();
+
+  let matches = label ? await findWindowsAsync(label, { includeShell: Boolean(wanted.includeShell) }) : [];
+  if (!matches.length && (wanted.kind === 'site' || wanted.kind === 'website')) {
+    const list = await listWindowsAsync({ force: true });
+    matches = list.filter((win) => BROWSER_PROCESSES.has(win.process));
+  }
+  const win = matches[0];
+  if (!win) {
+    throw new ToolError(`I could not find the window for "${label || 'that'}". It may already be closed.`);
+  }
+
+  await runPowerShellAsync(windowControlScript(win, wantedMode), 8_000);
+  return controlWindowResult(win, wantedMode);
 }
 
 // Windows that apps restore at their old (often small) size look like they
@@ -1454,7 +1568,30 @@ public static class BroMaximize {
 function maximizeWindowByHwnd(hwnd, { threshold = 0.95 } = {}) {
   const handle = Number(hwnd);
   if (!handle || process.platform !== 'win32') return { maximized: false };
-  const script = `${MAXIMIZE_NATIVE}
+  const script = maximizeScript(handle, threshold);
+  let stdout = '';
+  try { stdout = runPowerShell(script, 8_000).stdout || ''; } catch { /* best effort */ }
+  return maximizeOutcome(stdout);
+}
+
+async function maximizeWindowByHwndAsync(hwnd, { threshold = 0.95 } = {}) {
+  const handle = Number(hwnd);
+  if (!handle || process.platform !== 'win32') return { maximized: false };
+  let stdout = '';
+  try { stdout = (await runPowerShellAsync(maximizeScript(handle, threshold), 8_000)).stdout || ''; } catch { /* best effort */ }
+  return maximizeOutcome(stdout);
+}
+
+function maximizeOutcome(stdout) {
+  return {
+    maximized: /BRO_MAXIMIZED/.test(stdout),
+    alreadyMaximized: /BRO_ALREADY_MAXIMIZED/.test(stdout),
+    alreadyLarge: /BRO_ALREADY_LARGE/.test(stdout),
+  };
+}
+
+function maximizeScript(handle, threshold) {
+  return `${MAXIMIZE_NATIVE}
 $handle = [IntPtr]${handle}
 if ([BroMaximize]::IsZoomed($handle)) { [Console]::WriteLine('BRO_ALREADY_MAXIMIZED'); exit 0 }
 $rect = New-Object BroMaximize+RECT
@@ -1474,13 +1611,6 @@ if (($width -lt ($workWidth * ${Number(threshold)})) -or ($height -lt ($workHeig
 } else {
   [Console]::WriteLine('BRO_ALREADY_LARGE')
 }`;
-  let stdout = '';
-  try { stdout = runPowerShell(script, 8_000).stdout || ''; } catch { /* best effort */ }
-  return {
-    maximized: /BRO_MAXIMIZED/.test(stdout),
-    alreadyMaximized: /BRO_ALREADY_MAXIMIZED/.test(stdout),
-    alreadyLarge: /BRO_ALREADY_LARGE/.test(stdout),
-  };
 }
 
 // Maximizes whichever window currently owns the foreground, unless that window
@@ -1539,17 +1669,32 @@ async function focusOpenedWindow(labels, {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     for (const label of candidates) {
       let matches = [];
-      try { matches = findWindows(label, { includeShell: true }); } catch { matches = []; }
+      try { matches = await findWindowsAsync(label, { includeShell: true }); } catch { matches = []; }
       if (!matches.length) continue;
       try {
-        const focused = controlWindow({ label: matches[0].title, includeShell: true }, 'focus');
-        const sized = maximize ? maximizeWindowByHwnd(matches[0].hwnd) : { maximized: false };
+        const focused = await controlWindowAsync({ label: matches[0].title, includeShell: true }, 'focus');
+        const sized = maximize ? await maximizeWindowByHwndAsync(matches[0].hwnd) : { maximized: false };
         return { focused: true, label: matches[0].title, maximized: Boolean(sized.maximized), hwnd: matches[0].hwnd };
       } catch { /* try the next candidate or retry */ }
     }
     if (attempt < attempts - 1) await delay(delayMs);
   }
   return { focused: false };
+}
+
+async function raiseBroOverlayAsync() {
+  if (process.platform !== 'win32') return { raised: false };
+  const windows = (await listWindowsAsync({ force: true, includeBro: true }))
+    .filter((win) => /electron/i.test(win.process || '') && /^(?:bro\s*(?:voice|overlay).*)$/i.test(win.title || ''));
+  if (!windows.length) return { raised: false };
+  await Promise.all(windows.map((win) => {
+    const script = `${WINDOW_NATIVE}
+$handle = [IntPtr]${Number(win.hwnd)}
+[void][BroWindowsNative]::SetWindowPos($handle, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010)
+[Console]::WriteLine('BRO_TOPMOST_OK')`;
+    return runPowerShellAsync(script, 5_000).catch(() => {});
+  }));
+  return { raised: true, count: windows.length };
 }
 
 function raiseBroOverlay() {
@@ -1661,8 +1806,18 @@ function mediaKey(name) {
   return { key, sent: true };
 }
 
+async function mediaKeyAsync(name) {
+  if (process.platform !== 'win32') throw new ToolError('Media keys are only available on Windows.');
+  const key = String(name || '').toLowerCase();
+  const code = MEDIA_KEYS[key];
+  if (!code) throw new ToolError('That media key is not supported.');
+  const probe = await runPowerShellAsync(MEDIA_KEY_SCRIPT, 6_000, { BRO_MEDIA_VK: String(code) });
+  if (!String(probe.stdout || '').includes('BRO_MEDIA_OK')) throw new ToolError('Windows did not accept the media key.');
+  return { key, sent: true };
+}
+
 // Windows-key shortcuts (Start, Task View, Run, Quick Settings, clipboard,
-// emoji picker, …) cannot be typed through SendKeys, so they are sent as real
+// emoji picker, â€¦) cannot be typed through SendKeys, so they are sent as real
 // virtual-key events. An empty combo taps the Windows key on its own.
 const WIN_KEY_CODES = {
   tab: 0x09, escape: 0x1B, esc: 0x1B, space: 0x20, enter: 0x0D,
@@ -1758,7 +1913,7 @@ for ($i = 0; $i -lt $notches; $i++) {
 [Console]::WriteLine('BRO_SCROLL_OK')
 `;
 
-// Picks the window the user means when they say “scroll down”. Ranked: the real
+// Picks the window the user means when they say â€œscroll downâ€. Ranked: the real
 // window in front (BRO's popup and always-on-top helper widgets are ignored),
 // then the page or app BRO just opened, then the front-most ordinary window.
 function scrollTargetWindow() {
@@ -1778,9 +1933,13 @@ function scrollTargetWindow() {
 }
 
 // One wheel notch is 120 units. A positive vertical delta scrolls up (the
-// content moves down), so "down" must be negative — the earlier implementation
+// content moves down), so "down" must be negative â€” the earlier implementation
 // had this backwards. Horizontal scrolling uses MOUSEEVENTF_HWHEEL.
 function scrollActiveWindow(direction = 'down', amount = 0) {
+  return runScroll(scrollTargetWindow(), direction, amount);
+}
+
+async function scrollActiveWindowAsync(direction = 'down', amount = 0) {
   if (process.platform !== 'win32') throw new ToolError('Scrolling is only available on Windows.');
   const dir = String(direction || 'down').toLowerCase();
   const fallback = dir === 'left' || dir === 'right' ? 4 : 5;
@@ -1788,6 +1947,24 @@ function scrollActiveWindow(direction = 'down', amount = 0) {
   const horizontal = dir === 'left' || dir === 'right';
   const forward = dir === 'up' || dir === 'right';
   const target = scrollTargetWindow();
+  const probe = await runPowerShellAsync(SCROLL_SCRIPT, 12_000, {
+    BRO_SCROLL_FLAGS: horizontal ? '4096' : '2048',
+    BRO_SCROLL_DELTA: String(forward ? 120 : -120),
+    BRO_SCROLL_NOTCHES: String(notches),
+    BRO_SCROLL_HWND: target ? String(target.hwnd) : '',
+  });
+  const stdout = String(probe.stdout || '');
+  if (stdout.includes('BRO_SCROLL_NO_WINDOW')) throw new ToolError('I could not find a window to scroll.');
+  if (!stdout.includes('BRO_SCROLL_OK')) throw new ToolError('Windows did not scroll the active window.');
+  return { direction: dir, notches, window: target ? target.title : '' };
+}
+
+function runScroll(target, direction, amount) {
+  const dir = String(direction || 'down').toLowerCase();
+  const fallback = dir === 'left' || dir === 'right' ? 4 : 5;
+  const notches = Math.max(1, Math.min(30, Math.round(Number(amount) || fallback)));
+  const horizontal = dir === 'left' || dir === 'right';
+  const forward = dir === 'up' || dir === 'right';
   const probe = runPowerShell(SCROLL_SCRIPT, 12_000, {
     BRO_SCROLL_FLAGS: horizontal ? '4096' : '2048',
     BRO_SCROLL_DELTA: String(forward ? 120 : -120),
@@ -1938,7 +2115,7 @@ function clickElement(name, { button = 'left', double = false } = {}) {
   const label = String(name || '').trim();
   if (!label) throw new ToolError('Which visible label should I click?');
   const probe = runPowerShell(UI_CLICK_SCRIPT, 20_000, { BRO_UI_NAME: label, BRO_UI_BUTTON: button, BRO_UI_FIRST: '0', BRO_UI_DOUBLE: double ? '1' : '0' });
-  if (!String(probe.stdout || '').includes('BRO_CLICK_OK')) throw new ToolError(`I could not find a visible “${label}” to click.`);
+  if (!String(probe.stdout || '').includes('BRO_CLICK_OK')) throw new ToolError(`I could not find a visible â€œ${label}â€ to click.`);
   return { clicked: true, name: label, button, double };
 }
 
@@ -1948,7 +2125,7 @@ function clickFirstResult({ unread = false } = {}) {
   if (!String(probe.stdout || '').includes('BRO_CLICK_OK')) {
     throw new ToolError(unread
       ? 'I could not identify an unread item on screen. Open the inbox first, then try again.'
-      : 'I could not identify the first result on screen. Try “click …” with the exact visible label.');
+      : 'I could not identify the first result on screen. Try â€œclick â€¦â€ with the exact visible label.');
   }
   return { clicked: true, first: true, unread: Boolean(unread) };
 }
@@ -2006,7 +2183,7 @@ async function closeApp({ label = 'the app', names = [], pids = [], title = '', 
     for (const name of running) spawnSync('taskkill', ['/IM', name, '/T'], { timeout: 5_000, windowsHide: true });
     await delay(1_100);
     let pending = running.filter(processRunning);
-    // Tray-only apps (Telegram, Discord, …) are force-closed; document editors
+    // Tray-only apps (Telegram, Discord, â€¦) are force-closed; document editors
     // are left alone so nothing unsaved is lost.
     const forceable = pending.filter((name) => !PROMPTABLE_PROCESSES.has(name));
     for (const name of forceable) spawnSync('taskkill', ['/F', '/IM', name, '/T'], { timeout: 5_000, windowsHide: true });
@@ -2068,7 +2245,7 @@ async function closeCatalogApp(id) {
 
 async function closeStartMenuApp(name) {
   const installed = findInstalledApp(name);
-  if (!installed) throw new ToolError(`I could not find an installed app named “${name}”.`);
+  if (!installed) throw new ToolError(`I could not find an installed app named â€œ${name}â€.`);
   const processName = shortcutTargetName(installed.path);
   // Even when the shortcut has no readable target (Store apps), the window title
   // gives us a reliable way to close the app.
@@ -2171,7 +2348,7 @@ async function closeOpenedApps() {
   };
 }
 
-// Remembers a web page BRO opened so “close everything” can close its tab.
+// Remembers a web page BRO opened so â€œclose everythingâ€ can close its tab.
 function recordOpenedSite(url) {
   let host = '';
   try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { host = ''; }
@@ -2230,6 +2407,7 @@ function runStoredCommand(command, cwd) {
 
 module.exports = {
   findInstalledApp,
+  warmInstalledApps,
   findCatalogApp,
   openCatalogApp,
   openStartMenuApp,
@@ -2242,6 +2420,7 @@ module.exports = {
   closeForegroundWindow,
   closeAllWindows,
   controlWindow,
+  controlWindowAsync,
   findUserFile,
   openUserFile,
   userFileRoots,
@@ -2254,14 +2433,18 @@ module.exports = {
   emptyRecycleBin,
   focusOpenedWindow,
   maximizeWindowByHwnd,
+  maximizeWindowByHwndAsync,
   maximizeForegroundWindow,
   raiseBroOverlay,
+  raiseBroOverlayAsync,
   sendKeys,
   typeText,
   keySequenceFor,
   mediaKey,
+  mediaKeyAsync,
   pressWindowsKey,
   scrollActiveWindow,
+  scrollActiveWindowAsync,
   takeScreenshot,
   showDesktop,
   clickElement,
@@ -2270,7 +2453,9 @@ module.exports = {
   systemPower,
   escapeSendKeys,
   listWindows,
+  listWindowsAsync,
   findWindows,
+  findWindowsAsync,
   windowMatchesText,
   siteHints,
   scanStartMenu,

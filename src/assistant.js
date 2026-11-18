@@ -252,6 +252,71 @@ function isKnownSite(value) {
 // “open YouTube” then “play <video name>” → search that site. Only runs when
 // the previous target was a website that supports search and the phrase is not
 // already a real app, folder, project, or site.
+// A bare app or site name ("notepad", "chrome", "youtube") is a command, not a
+// question. Recognising it here keeps the instant path and, more importantly,
+// stops the model from announcing an action it is not able to perform.
+function isBareOpenName(value, projects) {
+  const text = String(value || '').trim();
+  if (!text || text.length > 40) return false;
+  if (text.split(/\s+/).length > 3) return false;
+  if (/\b(?:and|or|but|because|if|when|what|why|how|who|where|which|is|are|was|were|can|could|should|would|do|did|does)\b/i.test(text)) return false;
+  if (/\.[a-z0-9]{1,6}$/i.test(text)) return false; // a file name, not a command
+  if (COMMAND_VERB.test(text)) return false;
+  if (normalizeDesktopTarget(text)) return true;
+  if (isKnownSite(text)) return true;
+  if (projectByName(projects, text)) return true;
+  if (resolveAppEntry(text)) return true;
+  const installed = findInstalledApp(text, { cachedOnly: true });
+  return Boolean(installed && installed.score >= 92);
+}
+
+// A small model likes to answer "Opening Notepad for you now." even though it
+// cannot touch the desktop. If nothing actually ran, that sentence is a lie, so
+// replace it with the command the user can say instead.
+const COMMAND_VERB = /^(?:open|close|launch|start|play|pause|scroll|click|type|search|find|show|tell|set|take|make|send|call|stop|mute|unmute|lock|minimize|maximize|restore|switch|go|bring|hide|activate|wake|restart|shutdown|sleep)\b/i;
+
+const ACTION_CLAIM = /^(?:opening|open(?:ed|ing)?\s+(?:it|that|notepad|chrome|youtube)|i(?:'| a)?m opening|i(?:'| ha)?ve opened|i opened|done\b|sure[,!.]\s*(?:i(?:'| ha)?ve|i(?:'| a)?m)|closing|i(?:'| ha)?ve closed|clicking|i clicked|scrolling|i scrolled|i(?:'| ha)?ve scrolled|typing|i typed|taking a screenshot|i took a screenshot|playing|i(?:'| ha)?ve started)/i;
+
+const UNPERFORMED_ACTION_REPLY = 'I can’t run that from here on my own. Say it as a command — for example “open Notepad” — and I’ll do it right away.';
+
+function deniesUnperformedAction(reply) {
+  return ACTION_CLAIM.test(String(reply || '').trim());
+}
+
+
+
+// "what's the time", "what day is it" — answered locally and instantly, because
+// a small model guessing at the clock is both slow and wrong.
+function clockAnswer(value) {
+  const text = String(value || '').toLowerCase().replace(/[?.!,\s]+$/, '').trim();
+  const wantsTime = /^(?:what(?:'?s| is)? (?:the )?time(?: is it| now)?|what time is it|the time|current time|tell me the time|time now|time please|what time do you have)$/.test(text);
+  const wantsDate = /^(?:what(?:'?s| is)? (?:the )?date(?: today| is it| now)?|what date is it(?: today)?|what day is it(?: today)?|today'?s date|todays date|what(?:'?s| is) today(?:'?s date)?|current date)$/.test(text);
+  if (!wantsTime && !wantsDate) return '';
+  const now = new Date();
+  const time = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const date = now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  if (wantsTime && wantsDate) return `It's ${time} on ${date}.`;
+  return wantsTime ? `It's ${time}.` : `Today is ${date}.`;
+}
+
+// "open youtube and search lofi beats" — a site plus a query in one breath. The
+// site's own search URL is built directly, so the whole command stays local.
+function compoundSiteSearch(commandText) {
+  const match = commandText.match(/^(?:open(?:\s+up)?|go\s+to|visit|take\s+me\s+to)\s+(?:the\s+)?(.+?)\s+(?:and|then)\s+(search(?:\s+for)?|look\s+up|find|play|watch)\s+(.+)$/i);
+  if (!match) return null;
+  let url = '';
+  try { url = resolveSiteUrl(stripActionFillers(cleanTarget(match[1]))); } catch { return null; }
+  if (!url) return null;
+  const query = stripActionFillers(cleanTarget(match[3])).replace(/^for\s+/i, '').trim();
+  if (!query || query.length < 2 || query.length > 120) return null;
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return null; }
+  const template = SITE_SEARCH_TEMPLATES.find((item) => item.host.test(host));
+  if (!template) return null;
+  const wantsPlayback = /^(?:play|watch)$/i.test(match[2]);
+  return { site: template.name, query, play: Boolean(template.play && wantsPlayback), build: template.build };
+}
+
 function siteSearchIntent(commandText, lastTarget, projects) {
   if (!lastTarget || lastTarget.kind !== 'site') return null;
   const match = commandText.match(/^(open|play|watch|find|look\s+(?:for|up)|put\s+on|show\s+me)\s+(.+)$/i);
@@ -508,8 +573,7 @@ async function handleChat({ message, history = [], projects = [], settings, user
     result.reply = `Hey ${userName}! I’m BRO, your local assistant. I’m here and ready whenever you are. I’ll only take action when you explicitly ask me to.`;
     return result;
   }
-  const commandText = stripCommandPoliteness(stripGreetingPrefix(text));
-  const lower = commandText.toLowerCase();
+  let commandText = stripCommandPoliteness(stripGreetingPrefix(text));
 
   if (/^(?:activate|start|wake(?:\s+up)?)\s+bro(?:\s+command)?$/i.test(commandText)) {
     result.actions.push({ id: 'activate_bro', type: 'activate_bro', args: {}, label: 'Activate BRO voice popup' });
@@ -521,6 +585,17 @@ async function handleChat({ message, history = [], projects = [], settings, user
     result.reply = 'Okay, I’ll stop listening. Press Ctrl + Alt + B whenever you want to talk again.';
     return result;
   }
+
+  const clock = clockAnswer(commandText);
+  if (clock) {
+    result.reply = clock;
+    return result;
+  }
+
+  // "notepad", "chrome", "youtube" — say the name alone and BRO opens it, at the
+  // same speed as "open notepad".
+  if (isBareOpenName(commandText, projects)) commandText = `open ${commandText}`;
+  const lower = commandText.toLowerCase();
 
   // A previous sentence asked for something risky (shut down, empty the
   // Recycle Bin, delete a file). It only runs after a clear spoken "yes".
@@ -857,6 +932,23 @@ async function handleChat({ message, history = [], projects = [], settings, user
     return result;
   }
 
+  const multi = compoundSiteSearch(commandText);
+  if (multi) {
+    if (multi.play && /youtube/i.test(multi.site)) {
+      const played = await playOnYouTube(multi.query, multi.site);
+      result.actions.push(played.action);
+      result.context.lastTarget = contextForAction(played.action, projects);
+      result.reply = played.reply;
+      return result;
+    }
+    const url = multi.build(multi.query);
+    const action = { id: 'open_url', type: 'open_url', args: { url }, label: `Search ${multi.site} for ${multi.query}` };
+    result.actions.push(action);
+    result.context.lastTarget = contextForAction(action, projects);
+    result.reply = `Searching ${multi.site} for “${multi.query}”.`;
+    return result;
+  }
+
   const openRequest = commandText.match(/^(?:open(?:\s+up)?|launch|start|visit|go\s+to|take\s+me\s+to|bring\s+up|pull\s+up|fire\s+up|boot\s+up|load|show\s+me|check(?:\s+my)?)\s+(?:the\s+)?(?:url|site|website|web\s+site|app|application|page)?\s*(.+)$/i);
   if (openRequest) {
     const rawTarget = openRequest[1].trim();
@@ -969,11 +1061,14 @@ async function handleChat({ message, history = [], projects = [], settings, user
   if (result.provider.configured) {
     const projectSummary = projects.length ? projects.map((project) => `${project.name}: ${Object.keys(project.commands || {}).join(', ') || 'no profiles'}`).join('; ') : 'none';
     // Short prompt on purpose: a small local model pays for every prompt token in prefill time.
-    const system = `You are BRO, a concise voice assistant for ${userName} on Windows. Projects: ${projectSummary}. Answer in one to three short spoken sentences; no lists, no markdown. You cannot run commands yourself: the app handles opening apps, sites, and scrolling. Never claim an action you did not observe.`;
+    const system = `You are BRO, a concise voice assistant for ${userName} on Windows. Projects: ${projectSummary}. Answer in one to three short spoken sentences; no lists, no markdown. You cannot run commands or touch the computer: the app does that. Never say you opened, closed, clicked, scrolled, typed, or changed anything. If asked for the time, date, battery, or a file on this PC, say you cannot read it rather than guessing.`;
     const local = isLocalBaseUrl(settings && settings.baseUrl);
     const turns = local ? 6 : 10;
     const completion = await chatCompletion(settings, [{ role: 'system', content: system }, ...history.slice(-turns), { role: 'user', content: text }]);
-    if (completion.ok) { result.reply = completion.reply; return result; }
+    if (completion.ok) {
+      result.reply = deniesUnperformedAction(completion.reply) ? UNPERFORMED_ACTION_REPLY : completion.reply;
+      return result;
+    }
     result.reply = completion.reason === 'provider timed out'
       ? 'The configured AI provider took too long to answer. The local model may still be starting; please try again.'
       : completion.reason === 'model not installed'

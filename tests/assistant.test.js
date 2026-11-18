@@ -169,3 +169,60 @@ test('does not claim unsupported browser playback or WhatsApp sending', async ()
   assert.deepEqual(message.actions, []);
   assert.match(message.reply, /will not send a message/i);
 });
+
+test('a bare app or site name is an open command, not a question', async () => {
+  // Saying just the name must take the same instant path as "open ...", so a
+  // configured provider is never consulted and cannot promise an action.
+  const originalFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => { called = true; throw new Error('provider should not be called'); };
+  try {
+    const settings = { baseUrl: 'https://provider.invalid/v1', model: 'test-model', apiKey: 'test-key' };
+    const notepad = await handleChat({ ...emptyContext, message: 'notepad', settings });
+    assert.equal(notepad.actions[0].type, 'open_desktop_target');
+    assert.equal(notepad.actions[0].args.target, 'notepad');
+
+    const youtube = await handleChat({ ...emptyContext, message: 'YouTube', settings });
+    assert.equal(youtube.actions[0].type, 'open_url');
+    assert.equal(youtube.actions[0].args.url, 'https://www.youtube.com/');
+    assert.equal(called, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('a bare sentence is still a question, not a name to open', async () => {
+  const result = await handleChat({ ...emptyContext, message: 'what is the capital of australia' });
+  assert.deepEqual(result.actions, []);
+});
+
+test('the clock and the date are answered locally and correctly', async () => {
+  const originalFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => { called = true; throw new Error('provider should not be called'); };
+  try {
+    const settings = { baseUrl: 'https://provider.invalid/v1', model: 'test-model', apiKey: 'test-key' };
+    const time = await handleChat({ ...emptyContext, message: 'what time is it', settings });
+    assert.match(time.reply, /^It['’]s \d{1,2}:\d{2}\s?(?:am|pm)\.$/i);
+    assert.deepEqual(time.actions, []);
+
+    const date = await handleChat({ ...emptyContext, message: 'what date is it today', settings });
+    const now = new Date();
+    assert.ok(date.reply.includes(String(now.getFullYear())), date.reply);
+    assert.match(date.reply, /^(?:Today is|It’s)/);
+    assert.equal(called, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('a site plus a query runs as one local command', async () => {
+  const result = await handleChat({ ...emptyContext, message: 'open youtube and search lofi beats' });
+  assert.equal(result.actions[0].type, 'open_url');
+  assert.match(result.actions[0].args.url, /^https:\/\/www\.youtube\.com\/results\?search_query=lofi(\+|%20)beats$/);
+  assert.match(result.reply, /Searching YouTube for “lofi beats”/);
+
+  const google = await handleChat({ ...emptyContext, message: 'open google and search best laptops' });
+  assert.equal(google.actions[0].args.url, 'https://www.google.com/search?q=best%20laptops');
+});
+

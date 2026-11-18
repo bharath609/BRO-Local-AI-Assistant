@@ -237,7 +237,7 @@ async function executeAction(action) {
     return { type: action.type, result: tools.typeText(args.text) };
   }
   if (action.type === 'media_key') {
-    return { type: action.type, result: tools.mediaKey(action.args && action.args.key) };
+    return { type: action.type, result: await tools.mediaKeyAsync(action.args && action.args.key) };
   }
   if (action.type === 'windows_key') {
     return { type: action.type, result: tools.pressWindowsKey(action.args && action.args.keys) };
@@ -252,7 +252,7 @@ async function executeAction(action) {
   if (action.type === 'scroll') {
     const args = action.args || {};
     if (args.target) await focusActionTarget(args.target);
-    return { type: action.type, result: tools.scrollActiveWindow(args.direction, args.amount) };
+    return { type: action.type, result: await tools.scrollActiveWindowAsync(args.direction, args.amount) };
   }
   if (action.type === 'screenshot') {
     return { type: action.type, result: tools.takeScreenshot() };
@@ -344,9 +344,9 @@ async function bringOpenedThingForward(action, outcome) {
       // fill the screen. A restored browser window otherwise opens small.
       for (let attempt = 0; attempt < 8; attempt += 1) {
         try {
-          const focused = tools.controlWindow({ kind: 'site', label: '', url: args.url }, 'focus');
+          const focused = await tools.controlWindowAsync({ kind: 'site', label: '', url: args.url }, 'focus');
           if (focused && focused.hwnd) {
-            tools.maximizeWindowByHwnd(focused.hwnd, { threshold: 1 });
+            await tools.maximizeWindowByHwndAsync(focused.hwnd, { threshold: 1 });
             break;
           }
         } catch { /* the browser may need another moment */ }
@@ -367,7 +367,7 @@ async function bringOpenedThingForward(action, outcome) {
       await tools.focusOpenedWindow(labels);
     }
   } finally {
-    try { tools.raiseBroOverlay(); } catch { /* best effort */ }
+    try { await tools.raiseBroOverlayAsync(); } catch { /* best effort */ }
   }
 }
 
@@ -469,20 +469,27 @@ async function route(request, response) {
       pendingApprovals: 0,
     });
     const safeActions = [];
-    const outcomes = [];
+    const immediate = [];
     for (const action of result.actions) {
-      if (!IMMEDIATE_ACTIONS.has(action.type)) { safeActions.push(action); continue; }
-      const gate = await runWithGuardrails(action, { source: 'chat' });
-      if (gate.executed) {
-        outcomes.push(gate.outcome);
-        bringOpenedThingForward(action, gate.outcome).catch(() => {});
-      }
-      // In normal mode we don't queue approvals - actions just run or are blocked.
+      if (IMMEDIATE_ACTIONS.has(action.type)) immediate.push(action);
+      else safeActions.push(action);
     }
     result.actions = safeActions;
     // No approvals queue in normal mode.
     result.guardrails = publicGuardrails();
-    return json(response, 200, result);
+    const payload = json(response, 200, result);
+    // Launching a window or scrolling takes PowerShell a second or two. The reply
+    // is already on the wire, so do that work afterwards instead of making the
+    // user wait for it.
+    void (async () => {
+      for (const action of immediate) {
+        try {
+          const gate = await runWithGuardrails(action, { source: 'chat' });
+          if (gate.executed && gate.outcome) bringOpenedThingForward(action, gate.outcome).catch(() => {});
+        } catch { /* the audit log already records the failure */ }
+      }
+    })();
+    return payload;
   }
   if (request.method === 'POST' && pathname === '/api/action') {
     const body = await readBody(request);
@@ -549,5 +556,12 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => { voice.shutdown(); process.exit(0); });
 }
 
-if (require.main === module) server.listen(PORT, HOST, () => console.log(`BRO Local AI Assistant listening at http://${HOST}:${PORT}`));
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    console.log(`BRO Local AI Assistant listening at http://${HOST}:${PORT}`);
+    // Warm the Start Menu index in the background so the first "open Chrome" of a
+    // session does not have to walk the shortcuts folder.
+    setTimeout(() => { try { tools.warmInstalledApps(); } catch { /* ignore */ } }, 1_500);
+  });
+}
 module.exports = { server, executeAction, store, HOST, PORT };

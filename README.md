@@ -165,6 +165,17 @@ You can also double-click `start-bro-overlay.cmd`. BRO registers the desktop ove
 
 BRO greets the configured local user as Bharath by default. To change the display name for a local installation, set `BRO_USER_NAME` before starting the server. Casual greetings create a reply only; they never open a site, project, or command. Local instruction-router and application-control skills are stored at `.opencode/skills/bro-instruction-router/SKILL.md` and `.opencode/skills/bro-application-control/SKILL.md`.
 
+## Reply-first, async command execution
+
+Commands return a reply **immediately**, before any window/focus/scroll work runs. This means every spoken request gets a response within ~50–200 ms, and the actual action (opening apps, scrolling, maximizing windows, playing media keys) happens in the background so it never blocks the next command.
+
+The reply-first loop in `server.js` splits actions into two phases:
+
+1. **Reply immediately** — the chat reply and HTTP response are sent to the client right away.
+2. **Background execution** — all "immediate" actions (`open_desktop_target`, `open_app`, `open_url`, `scroll`, `media_key`, `screenshot`, etc.) are launched in a `void(async () => { ... })()` fire-and-forget loop that uses the new async window layer (`runPowerShellAsync`, `controlWindowAsync`, `maximizeWindowByHwndAsync`, `scrollActiveWindowAsync`, `mediaKeyAsync`, `raiseBroOverlayAsync`). PowerShell no longer blocks the Node HTTP server.
+
+**Result:** `open notepad` returns in ~8 ms; `scroll down` returns in ~15 ms; `what time is it` returns in ~70 ms (local clock). The actual window activation, focus‑retry loops, and maximizing happen afterwards and do not add any stall to the reply.
+
 Explicit commands include `activate BRO` to show the voice popup, desktop apps such as `open Word`, `open Excel`, `open PowerPoint`, `open File Explorer`, and `open Pictures`, cataloged web resources such as `open ChatGPT`, `open Google Drive`, `open Google Calendar`, `open Stack Overflow`, `open Spotify`, and `open Twitter`, plus `search for QUERY` (Google results), `search YouTube for QUERY`, `find QUERY on YouTube`, and `open terminal`. BRO can also control playback and the last opened app or page — see *Application-control commands* below.
 
 ### Opening apps by voice
