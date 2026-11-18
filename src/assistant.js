@@ -1,5 +1,5 @@
 const { validateHttpUrl, normalizeDesktopTarget, resolveWindowsTarget, findInstalledApp, findUserFile, USER_FILE_FOLDERS, findYouTubeVideo } = require('./tools');
-const { providerInfo, chatCompletion } = require('./provider');
+const { providerInfo, chatCompletion, isLocalBaseUrl } = require('./provider');
 const { matchApplicationSkill } = require('./skills/application-control');
 const { DEFAULT_MODE, normalizeMode } = require('./guardrails');
 const COMMAND_CATALOG = require('./command-catalog.json');
@@ -968,12 +968,17 @@ async function handleChat({ message, history = [], projects = [], settings, user
 
   if (result.provider.configured) {
     const projectSummary = projects.length ? projects.map((project) => `${project.name}: ${Object.keys(project.commands || {}).join(', ') || 'no profiles'}`).join('; ') : 'none';
-    const system = `You are BRO, a warm but concise local personal assistant for ${userName}. Registered projects: ${projectSummary}. You may discuss safe actions only: open http(s) URLs, open allowlisted Windows targets by name, list projects, open a registered project, or request a named profile run. Never invent shell commands or desktop paths; profile runs require explicit frontend approval. Do not claim to have taken an action unless the local app reports it completed. You cannot execute, approve, or bypass any action yourself — approval belongs to the user alone, and every action is checked against their guardrails before it runs. If the user asks you to do something, describe what you would do and let the app ask them to approve it. Casual greetings should receive a friendly greeting, not an action.`;
-    const completion = await chatCompletion(settings, [{ role: 'system', content: system }, ...history.slice(-10), { role: 'user', content: text }]);
+    // Short prompt on purpose: a small local model pays for every prompt token in prefill time.
+    const system = `You are BRO, a concise voice assistant for ${userName} on Windows. Projects: ${projectSummary}. Answer in one to three short spoken sentences; no lists, no markdown. You cannot run commands yourself: the app handles opening apps, sites, and scrolling. Never claim an action you did not observe.`;
+    const local = isLocalBaseUrl(settings && settings.baseUrl);
+    const turns = local ? 6 : 10;
+    const completion = await chatCompletion(settings, [{ role: 'system', content: system }, ...history.slice(-turns), { role: 'user', content: text }]);
     if (completion.ok) { result.reply = completion.reply; return result; }
     result.reply = completion.reason === 'provider timed out'
       ? 'The configured AI provider took too long to answer. The local model may still be starting; please try again.'
-      : 'My local model is not answering, so I can still run direct commands such as “open YouTube”, “open Notepad”, or “scroll down”. Start Ollama for open conversation.';
+      : completion.reason === 'model not installed'
+        ? `The local model “${settings.model}” is not installed yet. Run “ollama pull ${settings.model}” once, then ask me again.`
+        : 'My local model is not answering, so I can still run direct commands such as “open YouTube”, “open Notepad”, or “scroll down”. Start Ollama for open conversation.';
     return result;
   }
   result.reply = 'I did not recognize that request. Try “help”, “list projects”, “open https://example.com”, or “run PROFILE in PROJECT”.';

@@ -1,4 +1,4 @@
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -71,7 +71,10 @@ async function requestChat(settings, info, messages) {
       body: JSON.stringify(body),
       signal: controller.signal
     });
-    if (!response.ok) return { ok: false, reason: 'provider request failed' };
+    if (!response.ok) {
+      // Ollama answers 404 when the configured model was never pulled; say so instead of "offline".
+      return { ok: false, reason: response.status === 404 ? 'model not installed' : 'provider request failed' };
+    }
     const payload = await response.json();
     const content = useResponses ? responseText(payload) : chatText(payload);
     if (!content) return { ok: false, reason: 'provider returned no reply' };
@@ -96,9 +99,19 @@ function findOllama() {
   if (process.env.LOCALAPPDATA) candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'Ollama', 'ollama.exe'));
   if (process.env.PROGRAMFILES) candidates.push(path.join(process.env.PROGRAMFILES, 'Ollama', 'ollama.exe'));
   if (process.env['PROGRAMFILES(X86)']) candidates.push(path.join(process.env['PROGRAMFILES(X86)'], 'Ollama', 'ollama.exe'));
-  return candidates.find((candidate) => {
+  const installed = candidates.find((candidate) => {
     try { return fs.existsSync(candidate); } catch { return false; }
-  }) || '';
+  });
+  if (installed) return installed;
+  // Falls back to whatever `ollama` is on PATH (scoop, chocolatey, portable).
+  try {
+    const found = execFileSync('where.exe', ['ollama.exe'], { encoding: 'utf8', timeout: 3_000, windowsHide: true });
+    const first = String(found || '').split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    if (first && fs.existsSync(first)) return first;
+  } catch {
+    // not on PATH
+  }
+  return '';
 }
 
 async function ollamaResponding(base) {
