@@ -47,7 +47,7 @@ test('chatCompletion sends a bounded request to a local provider', async () => {
     assert.equal(request.options.headers.authorization, undefined);
     const body = JSON.parse(request.options.body);
     assert.equal(body.model, 'llama3.2:3b');
-    assert.equal(body.max_tokens, 512);
+    assert.equal(body.max_tokens, 220);
   } finally {
     global.fetch = originalFetch;
   }

@@ -62,9 +62,11 @@ async function requestChat(settings, info, messages) {
     if (settings.apiKey) headers.authorization = `Bearer ${settings.apiKey}`;
     const useResponses = info.protocol === 'responses' || (info.protocol === 'auto' && isOpenAIBaseUrl(info.baseUrl));
     const endpoint = useResponses ? `${info.baseUrl}/responses` : `${info.baseUrl}/chat/completions`;
+    // A small local model speaks a lot slower per token, so cap the answer length there.
+    const maxTokens = isLocalBaseUrl(info.baseUrl) ? 220 : 512;
     const body = useResponses
-      ? { model: info.model, input: messages, max_output_tokens: 512 }
-      : { model: info.model, messages, temperature: 0.2, max_tokens: 512 };
+      ? { model: info.model, input: messages, max_output_tokens: maxTokens }
+      : { model: info.model, messages, temperature: 0.2, max_tokens: maxTokens };
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
