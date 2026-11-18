@@ -12,8 +12,12 @@
   const DEFAULT_SILENCE_MS = 900;
   const DEFAULT_NO_SPEECH_MS = 6000;
   const DEFAULT_MAX_MS = 15000;
-  const MIN_SPEECH_MS = 300;
-  const CALIBRATION_MS = 350;
+  // A short, quick “BRO” is only about 200 ms of voiced audio. The old 300 ms
+  // minimum never counted it as speech, so every wake attempt waited out the
+  // full silence window before the clip was even checked — which is what made
+  // BRO feel deaf until the third try.
+  const MIN_SPEECH_MS = 180;
+  const CALIBRATION_MS = 250;
   const TRIM_PADDING_MS = 200;
   const WATCH_GAP_MS = 80;
 
@@ -235,18 +239,21 @@
 
       // The first moments of a capture measure the room instead of the user.
       if (clip.calibrating) {
-        clip.noiseFloor = Math.min(0.03, Math.max(clip.noiseFloor, rms));
+        // Cap the room estimate lower than before: in a noisy room the old 0.03
+        // ceiling raised the speech gate to 0.066, which quietly ignored normal
+        // speaking volume.
+        clip.noiseFloor = Math.min(0.02, Math.max(clip.noiseFloor, rms));
         if (now - clip.startedAt >= CALIBRATION_MS) {
           clip.calibrating = false;
           clip.lastSpeechAt = now;
-          clip.noiseFloor = Math.max(clip.noiseFloor, 0.004);
+          clip.noiseFloor = Math.max(clip.noiseFloor, 0.003);
         }
         return;
       }
 
       clip.peak = Math.max(clip.peak, rms);
       if (rms < clip.noiseFloor * 3) clip.noiseFloor = clip.noiseFloor * 0.94 + rms * 0.06;
-      const threshold = Math.max(0.008, clip.noiseFloor * 2.2);
+      const threshold = Math.max(0.006, clip.noiseFloor * 1.8);
       if (rms >= threshold) {
         clip.lastSpeechAt = now;
         clip.speechMs += frameMs;

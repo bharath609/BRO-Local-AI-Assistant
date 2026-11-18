@@ -421,6 +421,13 @@ async function route(request, response) {
   if (request.method === 'GET' && pathname === '/api/voice/status') {
     return json(response, 200, voice.status());
   }
+  if (request.method === 'POST' && pathname === '/api/voice/warm') {
+    // Start both Whisper servers before the first word is spoken. The overlay
+    // calls this as soon as it enters wake mode, and the server also calls it
+    // once at startup. It is idempotent: a warm server is reused.
+    voice.warm().catch(() => {});
+    return json(response, 200, { warming: true, ...voice.status() });
+  }
   if (request.method === 'POST' && pathname === '/api/voice/wake') {
     const body = await readBody(request, 8_000_000);
     const encoded = typeof body.audio === 'string' ? body.audio : '';
@@ -562,6 +569,10 @@ if (require.main === module) {
     // Warm the Start Menu index in the background so the first "open Chrome" of a
     // session does not have to walk the shortcuts folder.
     setTimeout(() => { try { tools.warmInstalledApps(); } catch { /* ignore */ } }, 1_500);
+    // Start the Whisper servers right away as well. A cold engine made the first
+    // "BRO" wait through a model load, so the microphone looked deaf until the
+    // second or third try.
+    setTimeout(() => { voice.warm().catch(() => {}); }, 2_500);
   });
 }
 module.exports = { server, executeAction, store, HOST, PORT };

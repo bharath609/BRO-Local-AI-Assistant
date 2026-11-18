@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { handleChat } = require('../src/assistant');
-const { matchWake, looksLikeCommand } = require('../src/voice');
+const { matchWake, looksLikeCommand, cleanTranscript } = require('../src/voice');
 const tools = require('../src/tools');
 
 const overlaySource = fs.readFileSync(require.resolve('../public/overlay.js'), 'utf8');
@@ -22,9 +22,28 @@ test('the wake matcher accepts the spoken name and keeps the rest of the sentenc
 });
 
 test('ordinary speech does not wake BRO', () => {
-  for (const text of ['brown', 'brotherhood', 'open telegram', 'what is the weather', '']) {
+  for (const text of ['brown', 'brotherhood', 'open telegram', 'what is the weather', '', 'bread', 'bring the file']) {
     assert.equal(matchWake(text).wake, false, text);
   }
+});
+
+test('the name is heard through fillers and mis-spellings', () => {
+  // The tiny model writes “BRO” in many shapes, and often keeps an “okay” or
+  // “um” in front. Each of these is a single wake word, not a second attempt.
+  for (const text of ['Um, BRO', 'Okay bro.', 'bruh', 'Broo', 'bra', 'bros', 'Brow']) {
+    assert.equal(matchWake(text).wake, true, text);
+  }
+  // ...and a filler word alone still does not count.
+  assert.equal(matchWake('um').wake, false);
+});
+
+test('common command mis-hearings are repaired before parsing', () => {
+  assert.equal(cleanTranscript('open g mail'), 'open Gmail');
+  assert.equal(cleanTranscript('open note pad'), 'open notepad');
+  assert.equal(cleanTranscript('open the calender'), 'open the calendar');
+  assert.equal(cleanTranscript('take a screen shot'), 'take a screenshot');
+  assert.equal(cleanTranscript('scroll town'), 'scroll down');
+  assert.equal(cleanTranscript('open v s code'), 'open VS Code');
 });
 
 test('sleep phrases put the microphone away', () => {
@@ -33,11 +52,16 @@ test('sleep phrases put the microphone away', () => {
   }
 });
 
-test('only command-shaped remainders run immediately', () => {
+test('anything clear said after the name runs as one command', () => {
   assert.equal(looksLikeCommand('open telegram'), true);
   assert.equal(looksLikeCommand('close chrome'), true);
-  assert.equal(looksLikeCommand('what time is it'), false);
-  assert.equal(matchWake('bro what time is it').commandText, '');
+  // Bare names and local questions are commands too; making the user repeat
+  // “BRO, chrome” or “BRO, what time is it” was the accuracy complaint.
+  assert.equal(looksLikeCommand('chrome'), true);
+  assert.equal(looksLikeCommand('what time is it'), true);
+  assert.equal(looksLikeCommand('um'), false);
+  assert.equal(matchWake('bro what time is it').commandText, 'what time is it');
+  assert.equal(matchWake('bro notepad').commandText, 'notepad');
 });
 
 test('the popup listens for the wake word between commands', () => {

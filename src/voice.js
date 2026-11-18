@@ -32,6 +32,11 @@ const WAKE_MODEL_PATH = process.env.BRO_WHISPER_WAKE_MODEL
   || (fs.existsSync(TINY_MODEL_PATH) ? TINY_MODEL_PATH : MODEL_PATH);
 const TRANSCRIBE_TIMEOUT_MS = Number(process.env.BRO_WHISPER_TIMEOUT_MS) || 45_000;
 const SERVER_START_TIMEOUT_MS = 30_000;
+// A wake check has to answer while the user is still holding the word in their
+// head. If a check is slow, the watcher must not stay deaf, so both checks are
+// capped well below the command timeout.
+const WAKE_TIMEOUT_MS = Number(process.env.BRO_WHISPER_WAKE_TIMEOUT_MS) || 8_000;
+const WAKE_SECOND_OPINION_TIMEOUT_MS = 3_000;
 // Beam search 5 is noticeably more accurate than greedy decoding for short
 // commands; BRO_WHISPER_BEAM=2 trades some accuracy for speed.
 const BEAM_SIZE = Math.max(1, Math.min(8, Number(process.env.BRO_WHISPER_BEAM) || 5));
@@ -197,9 +202,26 @@ function repairTranscript(text) {
     .replace(/\bmaximi[sz]ed\b/gi, 'maximized')
     .replace(/\bminimi[sz]e\b/gi, 'minimize')
     .replace(/\bminimi[sz]ed\b/gi, 'minimized')
-    .replace(/\b(?:vedio|vidio|videio|vidoe)\b/gi, 'video')
+    .replace(/\b(?:vedio|vidio|videio|vidoe|videos?)\b/g, (word) => (/s$/i.test(word) ? 'videos' : 'video'))
     .replace(/\bwhats\s*app\b/gi, 'WhatsApp')
-    .replace(/\byou\s+tube\b/gi, 'YouTube');
+    .replace(/\bwhat'?s\s+app\b/gi, 'WhatsApp')
+    .replace(/\byou\s*tube\b/gi, 'YouTube')
+    .replace(/\bg\s*mail\b/gi, 'Gmail')
+    .replace(/\b(?:note\s*pad|not\s*pad|nodepad)\b/gi, 'notepad')
+    .replace(/\b(?:calender|calandar)\b/gi, 'calendar')
+    .replace(/\b(?:calculater|calcullator)\b/gi, 'calculator')
+    .replace(/\b(?:power\s*point|powerpoint)\b/gi, 'PowerPoint')
+    .replace(/\bone\s*note\b/gi, 'OneNote')
+    .replace(/\bone\s*drive\b/gi, 'OneDrive')
+    .replace(/\bv\s*s\s*code\b/gi, 'VS Code')
+    .replace(/\b(?:file\s*explorer|file\s*manager)\b/gi, 'File Explorer')
+    .replace(/\btask\s+mang?er\b/gi, 'Task Manager')
+    .replace(/\bcontrol\s+pann?el\b/gi, 'Control Panel')
+    .replace(/\bdevice\s+mang?er\b/gi, 'Device Manager')
+    .replace(/\b(?:screen\s*shot|screens\s*shot|screen\s*short)\b/gi, 'screenshot')
+    .replace(/\bscroll\s+tow?n\b/gi, 'scroll down')
+    .replace(/\bun\s*mute\b/gi, 'unmute')
+    .replace(/\b(?:paws|pause)\b/gi, 'pause');
 }
 
 // “Um, open settings” should be treated as “open settings”; Whisper sometimes
@@ -240,7 +262,7 @@ function cleanCommandTranscript(value) {
   return cleaned;
 }
 
-async function requestServer(modelPath, fields, wavBuffer) {
+async function requestServer(modelPath, fields, wavBuffer, timeoutMs = TRANSCRIBE_TIMEOUT_MS) {
   const server = await ensureServer(modelPath);
   if (!server || !server.port) throw new Error('Whisper engine is not ready.');
   const { body, boundary } = multipartBody(fields, { name: 'command.wav', type: 'audio/wav', data: wavBuffer });
@@ -250,7 +272,7 @@ async function requestServer(modelPath, fields, wavBuffer) {
     path: '/inference',
     method: 'POST',
     headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, 'content-length': body.length },
-  }, body, TRANSCRIBE_TIMEOUT_MS);
+  }, body, timeoutMs);
   let parsed = null;
   try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
   return parsed || { text: raw };
@@ -361,8 +383,19 @@ const WAKE_PHRASES = [
   'yo bro', 'bro command', 'brother', 'bro',
   // The tiny model sometimes spells the same sound differently; these are the
   // variants observed from room audio, not extra commands.
-  'bros', 'broh', 'brah', 'brow',
+  'bros', 'broh', 'brah', 'brow', 'bruh', 'broo', 'brooo', 'bra', 'breh',
 ];
+
+// Ordinary English words that start with “br” and would otherwise be mistaken
+// for the wake word. Rejecting them keeps the looser matching below from
+// waking BRO up in the middle of a normal sentence.
+const WAKE_STOPWORDS = new Set([
+  'brown', 'browne', 'brother', 'brothers', 'brought', 'broke', 'broken', 'browser',
+  'browse', 'broad', 'bread', 'break', 'breakfast', 'brunch', 'bronze', 'broker',
+  'brook', 'broom', 'bring', 'brings', 'brick', 'bridge', 'bright', 'brilliant',
+  'brush', 'brave', 'brand', 'branch', 'breath', 'breathe', 'bruise', 'breeze',
+  'brief', 'briefly', 'brutal', 'bribe', 'britain', 'british',
+]);
 // Sleep is matched by shape rather than a fixed list, so “go to sleep mode”,
 // “sleep mode”, “go sleep”, “sleeping”, and small mis-hearings all work without
 // the user having to repeat themselves.
@@ -383,14 +416,26 @@ function isSleepPhrase(value) {
   return Boolean(text) && SLEEP_PATTERN.test(text);
 }
 
+// Anything meaningful said after the wake word is a command now. The old list
+// of verbs dropped bare app names (“BRO, chrome”), local clock questions
+// (“BRO, what time is it”), and any phrasing not on the list, so BRO answered
+// “Yes — listening…” and made the user repeat the whole sentence. Only pure
+// filler is rejected.
+const FILLER_WORDS = new Set(['you', 'thank', 'thanks', 'bye', 'okay', 'ok', 'the', 'a', 'i', 'hmm', 'uh', 'um', 'er', 'erm', 'ah', 'oh', 'so', 'and']);
+
 function looksLikeCommand(value) {
-  const text = String(value || '').trim();
+  const text = normalizeSpoken(stripLeadingFiller(value));
   if (!text) return false;
-  return /^(?:(?:please|bro|could you|can you|would you)\s+)?(?:open|launch|start|visit|go to|close|quit|exit|shut|kill|search|find|google|check|list|show|run|execute|activate|wake up|stop listening|sleep|help|status|what can you do|play|pause|resume|stop|forward|backward|rewind|next|previous|skip|maximize|minimize|restore|mute|unmute|volume|fullscreen|captions|scroll|type|write|press|click|tap|save|print|take|send|lock|unlock|switch|refresh|reload|create|make|add|new|delete|remove|trash|rename|copy|cut|paste|undo|redo|empty|clear|record|guardrails?|safety|security|approve|approval|audit|freeze|unfreeze)\b/i.test(text);
+  const words = text.split(' ').filter(Boolean);
+  if (!words.length || words.length > 12) return false;
+  return !words.every((word) => FILLER_WORDS.has(word));
 }
 
 function matchWake(value) {
-  const text = normalizeSpoken(value);
+  // “Um, BRO”, “okay bro”, “hey, BRO” — filler at the start of the clip must not
+  // hide the wake word. Without this, a perfectly clear “BRO” that the tiny
+  // model wrote as “Okay bro.” was silently ignored.
+  const text = normalizeSpoken(stripLeadingFiller(value));
   if (!text) return { wake: false, sleep: false, remainder: '', commandText: '' };
   if (SLEEP_PHRASES.has(text) || isSleepPhrase(text)) return { wake: false, sleep: true, remainder: '', commandText: '' };
   for (const phrase of WAKE_PHRASES) {
@@ -400,44 +445,111 @@ function matchWake(value) {
       return { wake: true, sleep: false, remainder, commandText: looksLikeCommand(remainder) ? remainder : '' };
     }
   }
-  // The tiny wake model spells “BRO” in many ways (bra, brah, broo, bros).
+  // The tiny wake model spells “BRO” in many ways (bra, brah, broo, bruh, bros).
   // Accept those shapes so the name never has to be said twice, while still
   // rejecting ordinary words such as “brown” or “brotherhood”.
   const [first, ...rest] = text.split(' ');
-  if (/^br[oah]{1,4}[hsd]?$/.test(first)) {
+  if (!WAKE_STOPWORDS.has(first) && /^br[uoahe]{1,4}[whsd]?$/.test(first)) {
     const remainder = rest.join(' ').trim();
     return { wake: true, sleep: false, remainder, commandText: looksLikeCommand(remainder) ? remainder : '' };
   }
   return { wake: false, sleep: false, remainder: '', commandText: '' };
 }
 
+// Does this transcript look like the tiny model mis-hearing “BRO”? Used to
+// decide whether one slow second opinion from the accurate model is worth it.
+// It is deliberately narrow: re-checking every short clip made the watcher deaf
+// for an extra second or two after ordinary speech.
+function looksLikeWakeGarble(value) {
+  const words = normalizeSpoken(value).split(' ').filter(Boolean);
+  if (!words.length || words.length > 2) return false;
+  return words.some((word) => {
+    if (WAKE_STOPWORDS.has(word)) return false;
+    if (/^br[uoahe]/.test(word) && word.length <= 6) return true;
+    return editDistanceAtMost(word, 'bro', 1);
+  });
+}
+
+function editDistanceAtMost(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return false;
+  const cols = b.length + 1;
+  let previous = new Array(cols);
+  let current = new Array(cols);
+  for (let j = 0; j < cols; j += 1) previous[j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    let rowBest = current[0];
+    for (let j = 1; j < cols; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
+      if (current[j] < rowBest) rowBest = current[j];
+    }
+    if (rowBest > max) return false;
+    const swap = previous;
+    previous = current;
+    current = swap;
+  }
+  return previous[b.length] <= max;
+}
+
+// The tiny wake model handles the short commands people actually say
+// (“open notepad”, “what time is it”, “search youtube for lofi beats”) as well
+// as the accurate model does, and it answers in under a second. Only genuinely
+// long sentences are re-checked, where the tiny model starts dropping words.
+function needsAccurateTranscript(remainder, audioDurationMs) {
+  const words = String(remainder || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return false;
+  return words.length >= 7 || audioDurationMs > 4200;
+}
+
 async function detectWake(wavBuffer) {
   const startedAt = Date.now();
   const info = validateWav(wavBuffer);
   const audioDurationMs = Math.max(0, Math.round(((info.bytes - 44) / (info.sampleRate * 2)) * 1000));
-  if (audioDurationMs < 200) return { text: '', wake: false, sleep: false, remainder: '', commandText: '', ms: 0, audioDurationMs };
+  if (audioDurationMs < 150) return { text: '', wake: false, sleep: false, remainder: '', commandText: '', ms: 0, audioDurationMs };
   let parsed;
   const wakeFields = { response_format: 'json', temperature: '0.0', language: 'en' };
   if (WAKE_PROMPT) wakeFields.prompt = WAKE_PROMPT;
   try {
-    parsed = await requestServer(WAKE_MODEL_PATH, wakeFields, wavBuffer);
+    parsed = await requestServer(WAKE_MODEL_PATH, wakeFields, wavBuffer, WAKE_TIMEOUT_MS);
   } catch (error) {
     // Fall back to the command model if the wake model is unavailable.
-    parsed = await requestServer(MODEL_PATH, wakeFields, wavBuffer);
+    parsed = await requestServer(MODEL_PATH, wakeFields, wavBuffer, WAKE_TIMEOUT_MS);
   }
   // Whisper’s no_speech_prob is unreliable for one-word clips (a clear “BRO”
   // can score 0.85), so the wake decision is made purely from the transcript.
   const text = cleanTranscript(parsed && typeof parsed.text === 'string' ? parsed.text : '');
   const first = matchWake(text);
-  if (first.wake || first.sleep) return { text, ...first, ms: Date.now() - startedAt, audioDurationMs, confirmed: false };
+  if (first.wake || first.sleep) {
+    // A command said in the same breath as the name was transcribed by the
+    // small wake model, which is fine for “BRO, notepad” but loses accuracy on
+    // longer requests. Re-check those with the accurate model.
+    if (first.commandText && needsAccurateTranscript(first.remainder, audioDurationMs)) {
+      try {
+        const refined = await requestServer(MODEL_PATH, {
+          response_format: 'json', temperature: '0.0', language: 'en', prompt: PROMPT,
+        }, wavBuffer, WAKE_TIMEOUT_MS);
+        const refinedText = cleanTranscript(refined && typeof refined.text === 'string' ? refined.text : '');
+        const refinedMatch = matchWake(refinedText);
+        if ((refinedMatch.wake || refinedMatch.sleep) && refinedMatch.commandText) {
+          return { text: refinedText, ...refinedMatch, ms: Date.now() - startedAt, audioDurationMs, confirmed: false, refined: true };
+        }
+      } catch (_) {
+        // Keep the wake-model transcript.
+      }
+    }
+    return { text, ...first, ms: Date.now() - startedAt, audioDurationMs, confirmed: false };
+  }
 
-  // Near miss: a short utterance that did not look like a wake phrase. The tiny
-  // model mangles single words (“BRO” can come back as “Brit”), so a short clip
-  // is re-checked with the accurate command model before deciding.
-  const words = text ? text.split(/\s+/).filter(Boolean) : [];
-  if (text && words.length <= 3 && audioDurationMs <= 3500 && WAKE_MODEL_PATH !== MODEL_PATH) {
+  // Near miss: a short utterance that looks like a mangled “BRO”. Only then is
+  // it worth asking the accurate model for a second opinion — re-checking every
+  // short clip kept the microphone deaf for an extra second or two, which made
+  // people repeat the wake word.
+  if (WAKE_MODEL_PATH !== MODEL_PATH && audioDurationMs <= 3500 && looksLikeWakeGarble(text)) {
     try {
-      const second = await requestServer(MODEL_PATH, { response_format: 'json', temperature: '0.0', language: 'en', prompt: PROMPT }, wavBuffer);
+      const second = await requestServer(MODEL_PATH, {
+        response_format: 'json', temperature: '0.0', language: 'en', prompt: 'BRO',
+      }, wavBuffer, WAKE_SECOND_OPINION_TIMEOUT_MS);
       const altText = cleanTranscript(second && typeof second.text === 'string' ? second.text : '');
       const altMatch = matchWake(altText);
       if (altMatch.wake || altMatch.sleep) return { text: altText, ...altMatch, ms: Date.now() - startedAt, audioDurationMs, confirmed: true };
@@ -447,6 +559,19 @@ async function detectWake(wavBuffer) {
     }
   }
   return { text, ...first, ms: Date.now() - startedAt, audioDurationMs, confirmed: false };
+}
+
+// Starts both Whisper servers ahead of the first spoken word. Without this the
+// very first “BRO” of a session paid for the server start and model load, so
+// the watcher was deaf for several seconds — the user said the name three times
+// before anything happened.
+async function warm() {
+  if (shuttingDown || !platformSupported()) return { ready: false, models: [] };
+  if (!binaryPresent(SERVER_BIN)) return { ready: false, models: [] };
+  const models = [...new Set([WAKE_MODEL_PATH, MODEL_PATH])].filter((model) => binaryPresent(model));
+  const results = await Promise.all(models.map((model) => ensureServer(model).catch(() => null)));
+  const ready = results.some((result) => Boolean(result && result.port));
+  return { ready, models: models.map((model) => path.basename(model)) };
 }
 
 function shutdown() {
@@ -461,6 +586,7 @@ function shutdown() {
 
 module.exports = {
   status,
+  warm,
   transcribe,
   detectWake,
   matchWake,

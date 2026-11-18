@@ -47,7 +47,15 @@ After a command finishes, BRO does not go deaf. It keeps the microphone open in 
 - **Say “BRO”** (or “hey BRO”, “brother”) — BRO answers “Yes — listening…” and captures your next command. You can also say them together: “BRO, open Telegram”.
 - **Press Ctrl + Alt + B** — starts listening immediately, no wake word needed.
 
-The wake word is matched loosely on purpose: “bra”, “broo”, “bros”, “brah”, and similar sound-alikes all count. If you pause after saying it, BRO re-opens the listening window once instead of asking you to call it a second time.
+The wake word is matched loosely on purpose: “bra”, “broo”, “bros”, “brah”, “bruh”, and similar sound-alikes all count. Filler before the name is ignored too, so “um, BRO”, “okay bro”, and “hey, BRO” all wake it in one go. If you pause after saying it, BRO re-opens the listening window once instead of asking you to call it a second time.
+
+Wake detection is built to answer on the **first** try:
+
+- **The engine is already warm.** BRO starts both Whisper servers when the app starts and again the moment it enters wake mode, so the first “BRO” of the day no longer waits through a model load. A cold engine was the main reason the name had to be repeated.
+- **A short word is enough.** A quick “BRO” is about 200 ms of speech; the recorder now counts it as speech and closes the clip after 450 ms of silence instead of waiting seconds before the engine sees it.
+- **The microphone never stops listening while a check runs.** Repeats are checked instead of being swallowed, and only the first confirmed wake starts a command.
+- **A second opinion is used sparingly.** If the tiny wake model writes a mangled “BRO”, the accurate model re-checks that one clip (capped at three seconds) — but only for clips that actually look like the name, so ordinary speech does not make the microphone deaf.
+- **The whole sentence runs at once.** “BRO, open notepad”, “BRO, chrome”, and “BRO, what time is it” are all captured as one command, so you never have to say the name and then repeat the request.
 
 To stop hands-free listening say **“sleep”**, **“sleep mode”**, “go to sleep mode”, “go sleep”, “sleeping”, “disappear”, or “goodbye”, or press the **Sleep** button in the popup. The popup disappears right away, but BRO keeps the microphone open in wake-word mode — saying **“BRO”** (or pressing **Ctrl + Alt + B**) brings the popup straight back and starts listening. The microphone is released completely only when the popup window is closed with its **×** button. Set `BRO_WAKE_WORD=0` if you want the microphone to stay closed until you press the hotkey.
 
@@ -102,7 +110,7 @@ For a website, “that video”/“the page” refers to the browser window BRO 
 
 Every successful open also brings the new window to the foreground and re-asserts the BRO popup as topmost, so Settings, apps, folders, and browsers no longer appear behind the current window. Apps and browsers open **already maximized** — Windows is launched with `/MAX`, and the default browser is started with `--start-maximized` — so there is no small window that grows a moment later.
 
-The wake check uses the small `ggml-tiny.en` model (about 0.5 s per check) and only runs when the room is actually loud enough to be speech, so idle room noise never reaches the recogniser. The first wake detection in a session warms that second model, which adds about a second once.
+The wake check uses the small `ggml-tiny.en` model (about 0.5 s per check) and only runs when the room is actually loud enough to be speech, so idle room noise never reaches the recogniser. Both the wake model and the command model are started when BRO starts, so the first wake detection of a session is as fast as every later one.
 
 ### Closing apps by voice
 
@@ -286,7 +294,7 @@ Execute if allowed / Ask for yes if needed → Outcome returned to user
 
 ---
 
-*Guardrails simplified – 93/93 tests pass, trusted mode default, commands execute directly without yes/no prompts.*
+*Guardrails simplified – 100/100 tests pass, trusted mode default, commands execute directly without yes/no prompts.*
 
 Without a provider, BRO still handles the local command and workspace intents. To enable general AI replies, use **Provider** in the UI and configure an OpenAI-compatible endpoint. For a local Ollama model, use `http://127.0.0.1:11434/v1` and an installed model such as `qwen2.5:3b`; local endpoints do not require an API key. If Ollama is installed but not running, BRO starts it automatically and retries the request once. For OpenAI, use `https://api.openai.com/v1`, choose the Responses API (or Auto), and enter the exact model available to your account. Settings are stored locally under `data/settings.json`, which is ignored by git. You can also set `BRO_AI_BASE_URL`, `BRO_AI_MODEL`, `BRO_AI_PROTOCOL`, and `BRO_AI_API_KEY` in the process environment before starting BRO. Never put the key in a chat message.
 

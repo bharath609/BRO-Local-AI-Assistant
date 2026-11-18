@@ -6,8 +6,11 @@
   const $ = (selector) => document.querySelector(selector);
   const CONTEXT_STORAGE_KEY = 'bro-overlay-context-v1';
   const CAPTURE_OPTIONS = { silenceMs: 1100, noSpeechMs: 6000, maxMs: 15000 };
-  const WATCH_OPTIONS = { silenceMs: 550, noSpeechMs: 3500, maxMs: 3500 };
-  const WAKE_COOLDOWN_MS = 900;
+  // A wake clip only needs the name itself. A shorter silence window and a
+  // shorter no-speech window mean each attempt is checked sooner instead of
+  // waiting seconds before the engine even sees it.
+  const WATCH_OPTIONS = { silenceMs: 450, noSpeechMs: 2500, maxMs: 4000 };
+  const WAKE_COOLDOWN_MS = 400;
   // 20 s by default; BRO_AUTO_HIDE_MS tunes it for testing or personal taste.
   const AUTO_HIDE_MS = (window.broDesktop && Number(window.broDesktop.autoHideMs)) || 20000;
   // After every command BRO stays awake this long, treating the next thing you
@@ -22,7 +25,7 @@
   // phase: idle -> awake -> listening -> transcribing -> working -> idle
   //   idle    microphone closed, waiting for the hotkey
   //   awake   microphone open, listening only for the “BRO” wake word
-  const state = { phase: 'idle', mic: null, micStarting: null, engine: null, context: {}, debug: false, wake: true, lastWakeCheckAt: 0, lastWatchClipAt: 0, followUp: false, followUpDeadline: 0, followUpToken: 0, retryCapture: false };
+  const state = { phase: 'idle', mic: null, micStarting: null, engine: null, context: {}, debug: false, wake: true, lastWakeCheckAt: 0, lastWatchClipAt: 0, followUp: false, followUpDeadline: 0, followUpToken: 0, retryCapture: false, wakeActive: 0, lastWakeHandledAt: 0 };
   let heartbeatTimer = null;
   const debugVoice = (message) => { if (state.debug) console.log(message); };
   const els = {
@@ -260,6 +263,16 @@
     mic.startWatch({ ...WATCH_OPTIONS, onLevel: setLevel, onClip: (clip) => { handleWakeClip(clip); } });
   }
 
+  // Ask the backend to start (or reuse) the Whisper servers as soon as we enter
+  // wake mode. Without this the first “BRO” of a session waited through a model
+  // load, so it looked like the wake word had not been heard.
+  let warmRequested = false;
+  function warmVoiceEngine() {
+    if (warmRequested) return;
+    warmRequested = true;
+    api('/api/voice/warm', { method: 'POST', body: '{}' }).catch(() => { warmRequested = false; });
+  }
+
   // The watcher produces a clip at least every few seconds even in silence.
   // If that stops, the audio graph was suspended (Chromium does this when a
   // window is hidden or the system sleeps), so revive it instead of going deaf.
@@ -301,6 +314,7 @@
     state.phase = 'awake';
     renderUi();
     if (!quiet) setVoiceStatus('Say “BRO” to talk — or press Ctrl + Alt + B.');
+    warmVoiceEngine();
     beginWatch(mic);
     startHeartbeat();
     scheduleAutoHide();
@@ -336,14 +350,22 @@
     state.lastWatchClipAt = Date.now();
     debugVoice(`BRO wake clip ${clip.durationMs}ms peak=${clip.peak} reason=${clip.reason} hidden=${document.hidden}`);
     if (state.phase !== 'awake' || !state.mic) return;
-    if (clip.reason === 'cancelled' || clip.durationMs < 250) return;
-    if (clip.peak < 0.02) return; // room noise, not someone talking
+    if (clip.reason === 'cancelled' || clip.durationMs < 150) return;
+    // The old gate ignored anything quieter than 0.02 RMS, which is normal
+    // speaking volume for a single short word. 0.008 still rejects room noise.
+    if (clip.peak < 0.008) return; // room noise, not someone talking
+    // Allow one check to overlap while another is in flight, so a repeated
+    // “BRO” is not swallowed while the first attempt is still being decoded.
+    if (state.wakeActive >= 2) return;
     const now = Date.now();
     if (now - state.lastWakeCheckAt < WAKE_COOLDOWN_MS) return;
     state.lastWakeCheckAt = now;
 
     const mic = state.mic;
-    mic.stopWatch(); // one wake check at a time
+    // The watcher deliberately keeps running during the request. Stopping it
+    // first made the microphone deaf for the whole round-trip, which is why
+    // saying the name again usually did nothing.
+    state.wakeActive += 1;
     try {
       const result = await api('/api/voice/wake', { method: 'POST', body: JSON.stringify({ audio: clip.audio }) });
       if (state.phase !== 'awake' || state.mic !== mic) return;
@@ -352,11 +374,16 @@
         return;
       }
       if (result.wake) {
+        // Two overlapping checks can both hear the same “BRO”; only the first
+        // one starts a command.
+        if (Date.now() - state.lastWakeHandledAt < 1200) return;
+        state.lastWakeHandledAt = Date.now();
         console.log(`BRO wake word detected in ${result.ms}ms (${String(result.text || '').length} chars)`);
         debugVoice(`BRO wake transcript: ${result.text}`);
         state.retryCapture = false;
         cancelAutoHide();
         showWindow();
+        mic.stopWatch(); // one command capture at a time
         if (result.commandText) { await runCommandText(result.commandText); return; }
         setVoiceStatus('Yes — listening…');
         await captureCommand();
@@ -365,8 +392,10 @@
       debugVoice(`BRO ignored wake clip: ${JSON.stringify(result.text || '')} (${result.ms}ms)`);
     } catch (_) {
       // A failed wake check is never fatal; just keep listening.
+    } finally {
+      state.wakeActive = Math.max(0, state.wakeActive - 1);
     }
-    if (state.phase === 'awake' && state.mic === mic) resumeWatch();
+    // No wake: the watcher never stopped, so there is nothing to resume.
   }
 
   async function runCommandText(text) {

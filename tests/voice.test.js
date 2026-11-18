@@ -138,6 +138,28 @@ test('the server exposes the voice engine status', async () => {
   }
 });
 
+test('the wake engine can be warmed before the first word', async () => {
+  const { server } = require('../server');
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    // A cold Whisper start used to make the first “BRO” of a session wait for a
+    // model load, so the microphone looked deaf. The overlay now asks for this
+    // as soon as it enters wake mode.
+    const response = await fetch(`http://127.0.0.1:${port}/api/voice/warm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.warming, true);
+    assert.equal(body.engine, 'whisper.cpp');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('Ctrl+Alt+B stays a one-shot global shortcut handled by the popup', () => {
   assert.match(mainSource, /if \(registerElectronHotkey\(\)\) return/);
   assert.match(mainSource, /startWindowsHotkey\(\)/);
