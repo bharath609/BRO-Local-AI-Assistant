@@ -39,6 +39,48 @@ test('greetings bypass a configured provider', async () => {
   }
 });
 
+test('an unmapped PC action answers instantly instead of waiting on the model', async () => {
+  const originalFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => {
+    called = true;
+    throw new Error('the model cannot perform PC actions');
+  };
+  try {
+    const started = Date.now();
+    const result = await handleChat({
+      ...emptyContext,
+      message: 'scroll to the left a bit',
+      settings: { baseUrl: 'http://127.0.0.1:9/v1', model: 'qwen2.5:3b', apiKey: 'ollama' }
+    });
+    assert.equal(called, false);
+    assert.match(result.reply, /don’t know how to do that yet/);
+    assert.ok(Date.now() - started < 1000, 'the reply must not wait for a model');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('questions still reach the model', async () => {
+  const originalFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => {
+    called = true;
+    return { ok: true, async json() { return { message: { content: 'The Seine.' } }; } };
+  };
+  try {
+    const result = await handleChat({
+      ...emptyContext,
+      message: 'what river runs through paris',
+      settings: { baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:3b' }
+    });
+    assert.equal(called, true);
+    assert.equal(result.reply, 'The Seine.');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('a greeting prefix does not block an explicit URL request', async () => {
   const result = await handleChat({ ...emptyContext, message: 'Hey bro, open https://example.com' });
   assert.equal(result.actions.length, 1);

@@ -76,6 +76,11 @@ test('settings, folders, typing, and searches preserve the spoken values', async
   assert.equal(typing.actions[0].type, 'type_text');
   assert.equal(typing.actions[0].args.text, 'Hello World');
 
+  // “write a story” is a request for the assistant, not literal dictation —
+  // typing it into whatever window has focus was destructive.
+  const story = await handleChat({ ...emptyContext, message: 'write a long detailed story about a robot learning to cook' });
+  assert.equal((story.actions || []).some((action) => action.type === 'type_text'), false);
+
   const gmail = await handleChat({ ...emptyContext, message: 'search my gmail for Invoices' });
   assert.equal(gmail.actions[0].type, 'open_url');
   assert.match(gmail.actions[0].args.url, /#search\/Invoices$/);

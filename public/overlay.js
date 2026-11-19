@@ -5,7 +5,10 @@
 
   const $ = (selector) => document.querySelector(selector);
   const CONTEXT_STORAGE_KEY = 'bro-overlay-context-v1';
-  const CAPTURE_OPTIONS = { silenceMs: 1100, noSpeechMs: 6000, maxMs: 15000 };
+  // 800 ms of silence ends a command. Long enough for a natural breath in the
+  // middle of a sentence, short enough that the reply starts while the user is
+  // still looking at the screen.
+  const CAPTURE_OPTIONS = { silenceMs: 800, noSpeechMs: 6000, maxMs: 15000 };
   // A wake clip only needs the name itself. A shorter silence window and a
   // shorter no-speech window mean each attempt is checked sooner instead of
   // waiting seconds before the engine even sees it.
@@ -605,6 +608,17 @@
     else window.close();
   });
   window.addEventListener('beforeunload', () => { state.wake = false; cancelFollowUp(); closeMic(); });
+
+  // Wake mode must never be silently lost. A suspended audio graph, a failed
+  // capture, or a window that was hidden while a check was in flight could
+  // otherwise leave BRO idle and deaf until the hotkey was pressed — which is
+  // what made people call the name again and again. Every few seconds, if BRO
+  // is idle and the wake word is enabled, put it back into wake mode.
+  setInterval(() => {
+    if (!state.wake || state.wakeActive || state.followUp) return;
+    if (state.phase !== 'idle' || state.micStarting) return;
+    startWakeMode({ quiet: true });
+  }, 3000);
 
   loadContext();
   state.debug = Boolean(window.broDesktop && window.broDesktop.voiceDebug);

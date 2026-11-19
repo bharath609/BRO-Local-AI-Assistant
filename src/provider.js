@@ -1,13 +1,25 @@
 const { spawn, execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const DEFAULT_BASE_URL = '';
 const DEFAULT_MODEL = 'omnirush/gpt-6-astra';
 const DEFAULT_TIMEOUT_MS = 120_000;
+// A local model answers from the same machine the microphone is running on, so
+// a long wait means something is wrong (model loading, Ollama asleep). Fail in
+// half a minute with a useful message instead of leaving BRO “working”.
+const LOCAL_TIMEOUT_MS = Number(process.env.BRO_LOCAL_AI_TIMEOUT_MS || 30_000);
 const DEFAULT_PROTOCOL = 'auto';
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const GPT_6_1_SOL_MODEL = 'gpt-6.1-sol';
+const OLLAMA_PORT = '11434';
+// Leave half of the logical threads free so the wake word and command
+// transcription stay responsive while the model is generating. Whisper runs on
+// the other cores.
+const LOCAL_THREADS = Math.max(2, Math.floor(os.cpus().length / 2));
+const OLLAMA_KEEP_ALIVE = process.env.BRO_OLLAMA_KEEP_ALIVE || '10m';
+const OLLAMA_NUM_CTX = Number(process.env.BRO_OLLAMA_CTX || 2048);
 
 function normalizeProtocol(value) {
   const protocol = String(value || DEFAULT_PROTOCOL).trim().toLowerCase();
@@ -26,6 +38,20 @@ function isLocalBaseUrl(baseUrl) {
 function isOpenAIBaseUrl(baseUrl) {
   try {
     return new URL(baseUrl).hostname.toLowerCase() === 'api.openai.com';
+  } catch {
+    return false;
+  }
+}
+
+// Ollama's OpenAI-compatible endpoint ignores the tuning knobs BRO needs
+// (threads, context size, keep-alive). Its native /api/chat endpoint accepts
+// them, so local Ollama models use that path instead.
+function isOllamaBaseUrl(baseUrl) {
+  try {
+    const url = new URL(baseUrl);
+    const host = url.hostname.toLowerCase();
+    const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+    return (host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]') && port === OLLAMA_PORT;
   } catch {
     return false;
   }
@@ -55,7 +81,8 @@ function chatText(payload) {
 
 async function requestChat(settings, info, messages) {
   const controller = new AbortController();
-  const timeoutMs = Number(process.env.BRO_AI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+  const configured = Number(process.env.BRO_AI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+  const timeoutMs = isLocalBaseUrl(info.baseUrl) ? LOCAL_TIMEOUT_MS : configured;
   const timer = setTimeout(() => controller.abort(), Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS);
   try {
     const headers = { 'content-type': 'application/json' };
@@ -63,7 +90,9 @@ async function requestChat(settings, info, messages) {
     const useResponses = info.protocol === 'responses' || (info.protocol === 'auto' && isOpenAIBaseUrl(info.baseUrl));
     const endpoint = useResponses ? `${info.baseUrl}/responses` : `${info.baseUrl}/chat/completions`;
     // A small local model speaks a lot slower per token, so cap the answer length there.
-    const maxTokens = isLocalBaseUrl(info.baseUrl) ? 220 : 512;
+    // 120 tokens is already three or four spoken sentences, and it keeps a
+    // worst-case answer around 16 s instead of letting the request time out.
+    const maxTokens = isLocalBaseUrl(info.baseUrl) ? 120 : 512;
     const body = useResponses
       ? { model: info.model, input: messages, max_output_tokens: maxTokens }
       : { model: info.model, messages, temperature: 0.2, max_tokens: maxTokens };
@@ -89,7 +118,46 @@ async function requestChat(settings, info, messages) {
   }
 }
 
-const OLLAMA_PORT = '11434';
+async function requestOllama(settings, info, messages) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LOCAL_TIMEOUT_MS);
+  try {
+    const base = info.baseUrl.replace(/\/v1\/?$/, '');
+    const response = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: info.model,
+        messages,
+        stream: false,
+        // Keep the model resident between questions so the second one does not
+        // pay for a 2 GB load again, but cap the context and threads so voice
+        // capture keeps its share of the CPU.
+        keep_alive: OLLAMA_KEEP_ALIVE,
+        options: {
+          temperature: 0.2,
+          num_predict: 120,
+          num_ctx: OLLAMA_NUM_CTX,
+          num_thread: LOCAL_THREADS,
+        },
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return { ok: false, reason: response.status === 404 ? 'model not installed' : 'provider request failed' };
+    }
+    const payload = await response.json();
+    const content = payload?.message?.content;
+    if (typeof content !== 'string' || !content.trim()) return { ok: false, reason: 'provider returned no reply' };
+    return { ok: true, reply: content.trim() };
+  } catch (error) {
+    const aborted = error && error.name === 'AbortError';
+    return { ok: false, reason: aborted ? 'provider timed out' : 'provider request failed', network: !aborted };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 let ollamaAttempt = { at: 0, promise: null };
 
 function wait(ms) {
@@ -157,11 +225,21 @@ async function startLocalRuntime(baseUrl) {
 async function chatCompletion(settings, messages) {
   const info = providerInfo(settings);
   if (!info.configured) return { ok: false, reason: 'unconfigured' };
-  let result = await requestChat(settings, info, messages);
+  const native = isOllamaBaseUrl(info.baseUrl);
+  const send = () => (native ? requestOllama(settings, info, messages) : requestChat(settings, info, messages));
+  let result = await send();
   if (!result.ok && result.network && info.local) {
-    if (await startLocalRuntime(info.baseUrl)) result = await requestChat(settings, info, messages);
+    if (await startLocalRuntime(info.baseUrl)) result = await send();
   }
   return result.ok ? { ok: true, reply: result.reply } : { ok: false, reason: result.reason };
+}
+
+// Starts Ollama in the background (without loading a model) so the first
+// question of a session does not also pay for a process launch.
+async function warmLocalRuntime(baseUrl) {
+  if (!baseUrl || !isOllamaBaseUrl(baseUrl)) return false;
+  if (await ollamaResponding(baseUrl.replace(/\/v1\/?$/, ''))) return true;
+  return startLocalRuntime(baseUrl);
 }
 
 module.exports = {
@@ -174,7 +252,9 @@ module.exports = {
   normalizeProtocol,
   isLocalBaseUrl,
   isOpenAIBaseUrl,
+  isOllamaBaseUrl,
   providerInfo,
   responseText,
-  chatCompletion
+  chatCompletion,
+  warmLocalRuntime
 };

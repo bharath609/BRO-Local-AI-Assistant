@@ -16,10 +16,15 @@
   // minimum never counted it as speech, so every wake attempt waited out the
   // full silence window before the clip was even checked — which is what made
   // BRO feel deaf until the third try.
-  const MIN_SPEECH_MS = 180;
-  const CALIBRATION_MS = 250;
+  const MIN_SPEECH_MS = 120;
+  // Calibration exists to measure the room, but a word spoken as the clip opens
+  // lands inside it. Keep it short and make loud frames count (see handleSamples)
+  // so the first “BRO” of a clip is never mistaken for room tone.
+  const CALIBRATION_MS = 120;
   const TRIM_PADDING_MS = 200;
-  const WATCH_GAP_MS = 80;
+  // A word can be split across two watch clips. A short gap plus the pre-roll
+  // buffer means almost none of it is lost.
+  const WATCH_GAP_MS = 40;
 
   function mergeChunks(chunks, length) {
     const out = new Float32Array(length);
@@ -237,21 +242,36 @@
         try { onLevel(Math.min(1, rms * 14), rms); } catch (_) { /* UI callbacks must not break capture */ }
       }
 
+      // Track the loudest frame from the very first one. This used to happen
+      // only after calibration, so a quick “BRO” spoken as a watch clip opened
+      // left clip.peak at zero and the wake handler threw the clip away as room
+      // noise — the user had to call again.
+      clip.peak = Math.max(clip.peak, rms);
+
       // The first moments of a capture measure the room instead of the user.
       if (clip.calibrating) {
-        // Cap the room estimate lower than before: in a noisy room the old 0.03
-        // ceiling raised the speech gate to 0.066, which quietly ignored normal
-        // speaking volume.
-        clip.noiseFloor = Math.min(0.02, Math.max(clip.noiseFloor, rms));
+        // A genuinely loud frame during calibration is the user starting to
+        // speak. Counting it means a word at the opening of the clip still
+        // closes the clip after the normal silence window instead of waiting
+        // out the whole no-speech timeout.
+        if (rms >= 0.02) {
+          clip.lastSpeechAt = now;
+          clip.speechMs += frameMs;
+          if (clip.speechMs >= MIN_SPEECH_MS) clip.heardSpeech = true;
+        } else {
+          // Cap the room estimate lower than before: in a noisy room the old
+          // 0.03 ceiling raised the speech gate to 0.066, which quietly ignored
+          // normal speaking volume.
+          clip.noiseFloor = Math.min(0.02, Math.max(clip.noiseFloor, rms));
+        }
         if (now - clip.startedAt >= CALIBRATION_MS) {
           clip.calibrating = false;
-          clip.lastSpeechAt = now;
+          if (!clip.heardSpeech) clip.lastSpeechAt = now;
           clip.noiseFloor = Math.max(clip.noiseFloor, 0.003);
         }
         return;
       }
 
-      clip.peak = Math.max(clip.peak, rms);
       if (rms < clip.noiseFloor * 3) clip.noiseFloor = clip.noiseFloor * 0.94 + rms * 0.06;
       const threshold = Math.max(0.006, clip.noiseFloor * 1.8);
       if (rms >= threshold) {
@@ -263,7 +283,10 @@
         this.finishClip('silence');
         return;
       }
-      if (!clip.heardSpeech && now - clip.startedAt >= clip.settings.noSpeechMs) {
+      // Do not cut a word in half at the no-speech boundary: wait for a short
+      // quiet tail first. Without this, a “BRO” that started just before the
+      // timeout was split across two clips and neither half was recognised.
+      if (!clip.heardSpeech && now - clip.startedAt >= clip.settings.noSpeechMs && now - clip.lastSpeechAt >= 220) {
         this.finishClip('no-speech');
         return;
       }

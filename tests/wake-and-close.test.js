@@ -78,6 +78,17 @@ test('the popup listens for the wake word between commands', () => {
   assert.match(serverSource, /pathname === '\/api\/voice\/wake'/);
 });
 
+test('wake mode re-arms itself and is never silently lost', () => {
+  // A 3-second watchdog puts BRO back into wake mode whenever it is idle with
+  // the wake word enabled. Without it, one failed capture left the microphone
+  // off until the hotkey was pressed, so the name had to be called again.
+  assert.match(overlaySource, /setInterval\(\(\) => \{\s*if \(!state\.wake \|\| state\.wakeActive \|\| state\.followUp\) return;/);
+  assert.match(overlaySource, /startWakeMode\(\{ quiet: true \}\);\s*\},\s*3000\)/);
+  // The watch loop runs continuously; a clip that produced no wake word must not
+  // stop it.
+  assert.doesNotMatch(overlaySource, /if \(state\.phase === 'awake' && state\.mic === mic\) resumeWatch\(\)/);
+});
+
 test('the wake endpoint rejects a clip that is not audio', async () => {
   const { server } = require('../server');
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

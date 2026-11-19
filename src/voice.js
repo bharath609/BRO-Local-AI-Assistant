@@ -37,10 +37,15 @@ const SERVER_START_TIMEOUT_MS = 30_000;
 // capped well below the command timeout.
 const WAKE_TIMEOUT_MS = Number(process.env.BRO_WHISPER_WAKE_TIMEOUT_MS) || 8_000;
 const WAKE_SECOND_OPINION_TIMEOUT_MS = 3_000;
-// Beam search 5 is noticeably more accurate than greedy decoding for short
-// commands; BRO_WHISPER_BEAM=2 trades some accuracy for speed.
-const BEAM_SIZE = Math.max(1, Math.min(8, Number(process.env.BRO_WHISPER_BEAM) || 5));
-const THREADS = Math.max(2, Math.min(8, os.cpus().length - 1));
+// Beam search is more accurate than greedy decoding for short commands, but
+// each extra beam costs real time. 2 is a good trade on a laptop CPU; set
+// BRO_WHISPER_BEAM=1 for the fastest possible decode or 5 for maximum accuracy.
+const BEAM_SIZE = Math.max(1, Math.min(8, Number(process.env.BRO_WHISPER_BEAM) || 2));
+// os.cpus() reports logical threads (8 on a 4-core / 8-thread laptop). Whisper
+// runs fastest at the physical core count; using every logical thread made each
+// transcription slower because the two engines fought over hyperthreads.
+const PHYSICAL_CORES = Math.max(1, Math.floor(os.cpus().length / 2));
+const THREADS = Math.max(2, Math.min(6, PHYSICAL_CORES));
 const PROMPT = process.env.BRO_WHISPER_PROMPT
   || 'BRO voice commands: open Telegram, open WhatsApp, open Chrome, open YouTube, open Settings, open Downloads, open Calculator, open start menu, open control panel, open device manager, open task manager, refresh, refresh the desktop, play, pause, stop, resume, forward, backward, rewind, next video, previous video, scroll down, scroll up, scroll to the top, scroll to the bottom, page down, page up, volume up, volume down, mute, unmute, fullscreen, take a screenshot, maximize, minimize, restore, close this window, search my Gmail for invoices, type hello world, click first result, create a folder called Reports, lock the pc, shut down the pc, go to sleep.';
 // Deliberately empty: prompting the tiny model with “BRO” makes it hallucinate
@@ -144,14 +149,12 @@ function ensureServer(modelPath) {
       '--host', '127.0.0.1',
       '--port', String(port),
       '-t', String(THREADS),
-      '-bo', '1',
-      '-bs', '1',
       '-nt',
     ];
     if (wakeServer) {
       // Short, greedy decode with no prompt and no temperature fallback keeps
       // the wake check fast and stops it inventing wake phrases from noise.
-      args.push('-nf', '-sns', '-nth', '0.4');
+      args.push('-bo', '1', '-bs', '1', '-nf', '-sns', '-nth', '0.4');
       if (WAKE_PROMPT) args.push('--prompt', WAKE_PROMPT);
     } else {
       args.push('-bo', String(BEAM_SIZE), '-bs', String(BEAM_SIZE), '--prompt', PROMPT);
@@ -191,7 +194,12 @@ function multipartBody(fields, file) {
   return { body: Buffer.concat(parts), boundary };
 }
 
-const NOISE_ARTIFACTS = new Set(['you', 'thank you', 'thanks', 'bye', 'okay', 'bye bye', 'the', 'a', 'i', 'hmm', 'uh', 'um']);
+const NOISE_ARTIFACTS = new Set([
+  'you', 'thank you', 'thanks', 'bye', 'okay', 'bye bye', 'the', 'a', 'i', 'hmm', 'uh', 'um',
+  // Common things Whisper writes over breath or room noise.
+  'thank you for watching', 'thanks for watching', 'please subscribe', 'youre welcome',
+  'subtitles by the amaraorg community', 'transcribed by', 'silence', 'music',
+]);
 
 // Common Whisper spellings of BRO command words. This only rewrites whole
 // words, so phrases such as “forward” still reach the command parser intact
@@ -278,18 +286,22 @@ async function requestServer(modelPath, fields, wavBuffer, timeoutMs = TRANSCRIB
   return parsed || { text: raw };
 }
 
-async function transcribeWithServer(wavBuffer) {
-  const parsed = await requestServer(MODEL_PATH, {
-    response_format: 'verbose_json',
+async function transcribeWithServer(wavBuffer, modelPath = MODEL_PATH) {
+  // Plain `json`, not `verbose_json`: whisper.cpp enables token-level
+  // timestamps for the verbose shape, which more than doubled decode time on
+  // this machine (about 5 s instead of 2 s for a short command). The recorder
+  // already trims silence and rejects silent clips, and NOISE_ARTIFACTS catches
+  // the usual inventions, so the segment confidence filter is not worth the
+  // latency on the commands people speak.
+  const parsed = await requestServer(modelPath, {
+    response_format: 'json',
     temperature: '0.0',
     language: 'en',
     prompt: PROMPT,
   }, wavBuffer);
   const segments = Array.isArray(parsed.segments) ? parsed.segments : null;
   if (!segments) return cleanTranscript(parsed.text);
-  // Whisper invents short phrases over silence. Segments that the model itself
-  // marks as unlikely speech, or that decoded with very low confidence, are
-  // discarded before the text reaches the command parser.
+  // If a server ever answers with segments anyway, keep the confidence filter.
   const kept = segments.filter((segment) => {
     const noSpeech = Number(segment.no_speech_prob);
     const logprob = Number(segment.avg_logprob);
@@ -347,9 +359,35 @@ function validateWav(buffer) {
   return info;
 }
 
+// A short command ("open notepad", "scroll down", "mute") is decoded by the
+// small wake model first. It is about twice as fast as the accurate model and
+// just as reliable for a few words; anything longer, or anything it cannot
+// read, is decoded again with the accurate model.
+const FAST_TRANSCRIBE_MAX_MS = Number(process.env.BRO_FAST_TRANSCRIBE_MS || 2400);
+const FAST_TRANSCRIBE_MAX_WORDS = 4;
+
 async function transcribe(wavBuffer) {
   const startedAt = Date.now();
   const info = validateWav(wavBuffer);
+  const audioDurationMs = Math.max(0, Math.round(((info.bytes - 44) / (info.sampleRate * 2)) * 1000));
+
+  if (WAKE_MODEL_PATH !== MODEL_PATH && audioDurationMs > 0 && audioDurationMs <= FAST_TRANSCRIBE_MAX_MS && binaryPresent(WAKE_MODEL_PATH)) {
+    try {
+      const quick = await transcribeWithServer(wavBuffer, WAKE_MODEL_PATH);
+      const words = quick ? quick.split(/\s+/).filter(Boolean) : [];
+      if (quick && words.length && words.length <= FAST_TRANSCRIBE_MAX_WORDS) {
+        return {
+          text: cleanCommandTranscript(quick),
+          empty: false,
+          engine: 'whisper-server-fast',
+          ms: Date.now() - startedAt,
+          audioDurationMs,
+        };
+      }
+    } catch (_) {
+      // Fall through to the accurate model.
+    }
+  }
 
   let text = '';
   let engine = 'whisper-cli';
@@ -373,7 +411,7 @@ async function transcribe(wavBuffer) {
     empty: !text,
     engine,
     ms: Date.now() - startedAt,
-    audioDurationMs: Math.max(0, Math.round(((info.bytes - 44) / (info.sampleRate * 2)) * 1000)),
+    audioDurationMs,
   };
 }
 

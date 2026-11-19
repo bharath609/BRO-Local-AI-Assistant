@@ -1,6 +1,6 @@
 ﻿const path = require('node:path');
 const fs = require('node:fs');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawn, spawnSync, execFile } = require('node:child_process');
 
 const MAX_OUTPUT = 20 * 1024;
 const COMMAND_TIMEOUT = 30_000;
@@ -907,19 +907,20 @@ const EXE_BLOCKLIST = /^(?:unins\d*|setup|install|update|updater|helper|crashpad
 let startMenuCache = { at: 0, apps: [] };
 let startAppsCache = { at: 0, apps: [] };
 
-// Store/MSIX apps (ChatGPT, Claude, WhatsApp, â€¦) have no Start Menu .lnk file.
-// Get-StartApps lists every Start-visible app with the AppID needed to launch it.
-function scanStartApps(force = false) {
-  if (process.platform !== 'win32') return [];
-  if (!force && startAppsCache.apps.length && Date.now() - startAppsCache.at < 10 * 60_000) return startAppsCache.apps;
-  const probe = spawnSync('powershell.exe', [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-    'Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress',
-  ], { encoding: 'utf8', timeout: 20_000, windowsHide: true });
+// Store/MSIX apps have no Start Menu .lnk file. Get-StartApps lists every
+// Start-visible app with the AppID needed to launch it.
+//
+// The PowerShell call takes about two seconds. It used to run synchronously, so
+// the first "open <anything>" after the cache expired froze the whole server —
+// including the wake-word check and every transcription request. Now the scan
+// happens in the background and the command path only ever reads the cache.
+let startAppsRefresh = null;
+
+function parseStartApps(stdout) {
   let parsed = [];
-  try { parsed = JSON.parse(String(probe.stdout || '').trim() || '[]'); } catch { parsed = []; }
+  try { parsed = JSON.parse(String(stdout || '').trim() || '[]'); } catch { parsed = []; }
   if (!Array.isArray(parsed)) parsed = parsed ? [parsed] : [];
-  const apps = parsed
+  return parsed
     .filter((item) => item && typeof item.Name === 'string' && typeof item.AppID === 'string' && item.AppID.trim())
     .filter((item) => !APP_BLOCKLIST.test(item.Name))
     .map((item) => ({
@@ -929,6 +930,44 @@ function scanStartApps(force = false) {
       normalized: normalizeAppName(item.Name),
     }))
     .filter((item) => item.normalized);
+}
+
+function refreshStartApps() {
+  if (startAppsRefresh || process.platform !== 'win32') return startAppsRefresh || Promise.resolve([]);
+  startAppsRefresh = new Promise((resolve) => {
+    execFile('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      'Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress',
+    ], { encoding: 'utf8', timeout: 20_000, windowsHide: true }, (error, stdout) => {
+      startAppsRefresh = null;
+      const apps = error ? [] : parseStartApps(stdout);
+      if (apps.length) {
+        startAppsCache = { at: Date.now(), apps };
+        // The merged Start Menu list was built without these Store apps; drop it
+        // so the next lookup rebuilds cheaply (the folder walk is local) and
+        // includes them.
+        startMenuCache = { at: 0, apps: [] };
+      }
+      resolve(apps);
+    });
+  });
+  return startAppsRefresh;
+}
+
+function scanStartApps(force = false) {
+  if (process.platform !== 'win32') return [];
+  if (!force && startAppsCache.apps.length && Date.now() - startAppsCache.at < 10 * 60_000) return startAppsCache.apps;
+  // A cold or expired cache never blocks a spoken command: refresh in the
+  // background and use what is already known for this request.
+  if (!force) {
+    refreshStartApps();
+    return startAppsCache.apps;
+  }
+  const probe = spawnSync('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    'Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress',
+  ], { encoding: 'utf8', timeout: 20_000, windowsHide: true });
+  const apps = parseStartApps(probe.stdout);
   startAppsCache = { at: Date.now(), apps };
   return apps;
 }

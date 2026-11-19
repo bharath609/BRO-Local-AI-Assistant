@@ -279,6 +279,19 @@ const ACTION_CLAIM = /^(?:opening|open(?:ed|ing)?\s+(?:it|that|notepad|chrome|yo
 
 const UNPERFORMED_ACTION_REPLY = 'I can’t run that from here on my own. Say it as a command — for example “open Notepad” — and I’ll do it right away.';
 
+// Imperative PC actions. If a spoken sentence starts like one of these but no
+// local rule matched, the local model cannot help: it has no access to the PC.
+// Asking it costs seconds (and a model load after idle) and ends with an
+// apology, so BRO answers instantly instead.
+const PC_ACTION_START = /^(?:open|close|quit|exit|kill|launch|scroll|maximi[sz]e|minimi[sz]e|restore|fullscreen|captions?|subtitles?|zoom|refresh|reload|press|click|tap|save|print|screenshot|switch|skip|rewind|mute|unmute|volume|delete|remove|trash|rename|copy|cut|paste|undo|redo|empty|record|lock|shut|restart|sign)\b/i;
+const QUESTION_START = /^(?:how|what|why|when|where|who|which|whose|can|could|would|should|is|are|was|were|do|does|did|have|has|tell|explain|describe|write|define|give|name|suggest|recommend)\b/i;
+
+function looksLikePcAction(value) {
+  const text = String(value || '').trim();
+  if (!text || QUESTION_START.test(text)) return false;
+  return PC_ACTION_START.test(text);
+}
+
 function deniesUnperformedAction(reply) {
   return ACTION_CLAIM.test(String(reply || '').trim());
 }
@@ -1055,6 +1068,13 @@ async function handleChat({ message, history = [], projects = [], settings, user
 
   if (/^(?:send|message|text)\b/i.test(commandText) && /\bwhatsapp\b/i.test(commandText)) {
     result.reply = 'I can open WhatsApp Web, but I will not send a message until a browser-control session is connected and you approve the exact recipient and message.';
+    return result;
+  }
+
+  // A PC action BRO could not map. The local model has no access to the
+  // computer, so sending this to it only adds a slow, useless round-trip.
+  if (looksLikePcAction(commandText)) {
+    result.reply = `I heard “${commandText}”, but I don’t know how to do that yet. Try “open <app>”, “scroll down”, or say “help” for the full list.`;
     return result;
   }
 

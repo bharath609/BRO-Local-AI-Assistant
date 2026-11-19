@@ -1162,8 +1162,15 @@ const RULES = [
     id: 'type-text',
     re: /^(?:type|write|dictate|enter)\s+(?:this\s*:?\s*)?(.+)$/,
     run: (m, ctx) => {
-      const text = String(m[1]).replace(/^["“]|["”]$/g, '').trim();
+      const raw = String(m[1]).trim();
+      const text = raw.replace(/^["“]|["”]$/g, '').trim();
       if (!text) return null;
+      // “write a long story” or “type an email to my boss” is a request for the
+      // assistant, not literal dictation. Only short, literal text is typed —
+      // otherwise a content request is sprayed into whatever window has focus.
+      const words = text.split(/\s+/).filter(Boolean);
+      if (text.length > 80 || words.length > 12) return null;
+      if (!/^["“]/.test(raw) && /^(?:a|an|the|me|my|about|something|anything|some|this|that|it|everything)\b/i.test(text)) return null;
       return {
         action: {
           id: 'type_text',

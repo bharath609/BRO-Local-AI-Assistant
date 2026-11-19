@@ -88,6 +88,88 @@ test('the recorder downsamples device audio to 16 kHz and trims silence', () => 
   assert.ok(trimmed.length >= 4000);
 });
 
+// A controllable clock lets the capture logic be driven frame by frame.
+function loadRecorderWithClock() {
+  const clock = { t: 0 };
+  const sandbox = {
+    window: {},
+    navigator: { mediaDevices: { getUserMedia: () => Promise.reject(new Error('not used')) } },
+    btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
+    performance: { now: () => clock.t },
+    console,
+    Uint8Array,
+    Float32Array,
+    DataView,
+    Math,
+    Number,
+    Promise,
+    String,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(recorderSource, sandbox, { filename: 'recorder.js' });
+  return { recorder: sandbox.window.BroRecorder, clock };
+}
+
+const WATCH_SETTINGS = { silenceMs: 450, noSpeechMs: 2500, maxMs: 4000 };
+
+function feed(mic, clock, amplitude, ms, frameMs = 20) {
+  const samples = Math.max(1, Math.round((mic.sampleRate * frameMs) / 1000));
+  const frame = new Float32Array(samples);
+  frame.fill(amplitude);
+  for (let elapsed = 0; elapsed < ms; elapsed += frameMs) {
+    clock.t += frameMs;
+    mic.handleSamples(frame);
+  }
+}
+
+test('a word spoken as a watch clip opens still updates the clip peak', async () => {
+  const { recorder, clock } = loadRecorderWithClock();
+  const mic = new recorder.Microphone({});
+  mic.sampleRate = 16000;
+  // “BRO” arrives in the first 100 ms — entirely inside the old calibration
+  // window, which used to leave peak at zero and make the wake handler drop the
+  // clip as room noise.
+  const clipPromise = mic.startClip({ ...WATCH_SETTINGS });
+  feed(mic, clock, 0.1, 100);
+  feed(mic, clock, 0.0005, 3000);
+  const clip = await clipPromise;
+  assert.ok(clip.peak >= 0.05, `peak ${clip.peak}`);
+
+  // A word inside calibration also counts as speech, so the clip closes after
+  // the silence window instead of waiting out the whole no-speech timeout.
+  const { recorder: recorder2, clock: clock2 } = loadRecorderWithClock();
+  const mic2 = new recorder2.Microphone({});
+  mic2.sampleRate = 16000;
+  mic2.clip = null;
+  const speechClip = mic2.startClip({ ...WATCH_SETTINGS });
+  feed(mic2, clock2, 0.1, 220);
+  feed(mic2, clock2, 0.0005, 700);
+  const heard = await speechClip;
+  assert.equal(heard.reason, 'silence');
+  assert.ok(heard.peak >= 0.05, `peak ${heard.peak}`);
+});
+
+test('a word that starts just before the no-speech timeout is not cut in half', async () => {
+  const { recorder, clock } = loadRecorderWithClock();
+  const mic = new recorder.Microphone({});
+  mic.sampleRate = 16000;
+  const clipPromise = mic.startClip({ ...WATCH_SETTINGS });
+  feed(mic, clock, 0.0005, 2480);
+  // The timeout lands while “BRO” is being spoken; finishing now would leave two
+  // half-words that neither clip can recognise.
+  feed(mic, clock, 0.1, 80);
+  let settled = false;
+  clipPromise.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'clip finished in the middle of a word');
+  feed(mic, clock, 0.1, 160);
+  feed(mic, clock, 0.0005, 700);
+  const clip = await clipPromise;
+  assert.equal(clip.reason, 'silence');
+  assert.ok(clip.peak >= 0.05, `peak ${clip.peak}`);
+  assert.ok(clip.durationMs >= 200, `duration ${clip.durationMs}`);
+});
+
 test('the voice engine reports a helpful reason when it is not installed', () => {
   const voicePath = require.resolve('../src/voice');
   const previousHome = process.env.BRO_WHISPER_HOME;

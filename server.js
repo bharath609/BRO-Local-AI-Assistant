@@ -4,7 +4,7 @@ const path = require('node:path');
 const { URL } = require('node:url');
 const { createStore, ValidationError } = require('./src/store');
 const tools = require('./src/tools');
-const { providerInfo } = require('./src/provider');
+const { providerInfo, warmLocalRuntime } = require('./src/provider');
 const { handleChat, DEFAULT_USER_NAME } = require('./src/assistant');
 const voice = require('./src/voice');
 const guardrails = require('./src/guardrails');
@@ -573,6 +573,15 @@ if (require.main === module) {
     // "BRO" wait through a model load, so the microphone looked deaf until the
     // second or third try.
     setTimeout(() => { voice.warm().catch(() => {}); }, 2_500);
+    // Bring Ollama up in the background (no model load) so the first question of
+    // a session does not also wait for a process launch. If it is already
+    // running this is a no-op.
+    setTimeout(() => {
+      try {
+        const settings = store.loadSettings();
+        warmLocalRuntime(settings && settings.baseUrl).catch(() => {});
+      } catch { /* provider is optional */ }
+    }, 4_000);
   });
 }
 module.exports = { server, executeAction, store, HOST, PORT };
