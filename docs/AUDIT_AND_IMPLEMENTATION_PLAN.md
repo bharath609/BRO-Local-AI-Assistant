@@ -1,8 +1,8 @@
 # BRO Assistant — Audit Report & DevOps Implementation Plan
 
-Status: **Phases 0–5 complete (guardrail approval decision deferred); publishing and docs remain**
+Status: **Phases 0–6 complete (guardrail approval decision deferred); v1.0.0 published; docs polish remains**
 Date: 2026-11-20 (audit: 2026-11-19)
-Repository: https://github.com/bharath609/BRO-Local-AI-Assistant (public, no releases, no license)
+Repository: https://github.com/bharath609/BRO-Local-AI-Assistant (public, MIT, v1.0.0 released)
 Blueprint: `Bro_Assistant_DevOps_Blueprint.docx`
 
 > Implementation note (2026-11-20): Electron is now 45.4.1, the backend runs as
@@ -13,8 +13,10 @@ Blueprint: `Bro_Assistant_DevOps_Blueprint.docx`
 > verified by silent install, reinstall, launch, and uninstall (user data kept).
 > Verified with 119/119 tests, `npm run smoke` (`SMOKE_OK ... capabilities=42`),
 > and a DevTools check showing the renderer reports "Local server ready" while
-> an anonymous `/api/bootstrap` request returns 401. The installer is unsigned
-> and has not been published yet (no GitHub credentials in this environment).
+> an anonymous `/api/bootstrap` request returns 401. The installer is unsigned.
+> v1.0.0 is published with `BRO-Assistant-Setup-1.0.0.exe` (316,777,766 bytes,
+> SHA-256 `355b1761e89c1a22976fe8768105b121be62f84d27c4df76651b9d0091d38892`)
+> and `SHA256SUMS.txt`; GitHub reports the same digest for the uploaded asset.
 
 ---
 
@@ -365,14 +367,15 @@ Total: roughly **2–3 weeks part-time**; critical path is Phase 2 → 5 → cle
 - [x] Artifact smoke test in both workflows
 - [x] SHA-256 checksums
 - [x] Least-privilege GitHub Release (`contents: write` only)
-- [ ] Workflows have not run yet (no GitHub CLI/credentials in this environment)
+- [x] CI workflow ran green on `main` (run 44679506354)
+- [x] Release workflow adds a manual `workflow_dispatch` trigger (tag pushes did not start it for `v1.0.0`)
 
 ### Phase 7
 - [ ] README user-first rewrite + screenshots (install section added)
 - [ ] CONTRIBUTING / CHANGELOG / SECURITY / PRIVACY (`docs/SECURITY.md` added)
 - [ ] User guide + troubleshooting
-- [ ] Release notes + known limitations (`docs/RELEASING.md` added)
-- [ ] Publish v1.0.0
+- [x] Release notes + known limitations (`docs/RELEASING.md` added)
+- [x] Publish v1.0.0 (installer 316,777,766 bytes + `SHA256SUMS.txt` on GitHub Releases)
 
 ---
 

@@ -57,8 +57,24 @@ Artifacts:
    runs the tests and smoke test, builds the installer, writes
    `SHA256SUMS.txt`, and publishes both as GitHub Release assets.
 
-If the tag workflow cannot run, upload the local `dist\*.exe` and a SHA-256
-checksum manually with `gh release create`.
+If a tag push did not start the workflow, open **Actions → Release → Run
+workflow** and enter the tag (for example `v1.0.0`); the manual run checks out
+that tag and publishes it the same way.
+
+If CI cannot run at all, upload the local `dist\BRO-Assistant-Setup-<version>.exe`
+and `dist\SHA256SUMS.txt` by hand on the release page (or with
+`gh release create`). Never upload `dist\win-unpacked`: that folder is a
+debugging build, not an installer.
+
+## Published releases
+
+| Version | Installer asset | Notes |
+| --- | --- | --- |
+| [v1.0.0](https://github.com/bharath609/BRO-Local-AI-Assistant/releases/tag/v1.0.0) | `BRO-Assistant-Setup-1.0.0.exe` (302 MB) | First Windows release, unsigned |
+
+The release page also lists **Source code (zip)** and **Source code (tar.gz)**.
+GitHub generates those automatically for every tag; they contain source only and
+cannot be installed.
 
 ## Clean-VM checklist
 
