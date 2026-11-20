@@ -2,6 +2,20 @@
 
 BRO is a local-first personal workbench. It gives you a chat interface, a built-in offline voice engine, safe website/project opening, explicit terminal launching, and named project commands that always require approval before execution.
 
+## Install on Windows
+
+Download the latest `BRO-Assistant-Setup-<version>.exe` from
+[GitHub Releases](https://github.com/bharath609/BRO-Local-AI-Assistant/releases)
+and run it. Launch **BRO Assistant** from the Start menu or the tray.
+
+- Windows 10/11 x64.
+- The build is not code-signed yet, so SmartScreen may show an "unknown
+  publisher" warning. Only run an installer downloaded from this repository.
+- Voice works offline: the installer bundles the whisper.cpp engine and models.
+- Settings, projects, and logs live in `%APPDATA%\BRO Assistant` and are kept
+  when you uninstall.
+- If no release is listed yet, build from source with the steps below.
+
 ## Run it
 
 Use Node.js 22 or newer:

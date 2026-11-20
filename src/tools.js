@@ -852,6 +852,16 @@ function activateBro() {
   if (probe.status === 0 && /BRO_WINDOW_ACTIVATED/.test(probe.stdout || '')) {
     return { activated: true, kind: 'bro_voice', target: 'BRO voice', mode: 'shown' };
   }
+  // Packaged builds relaunch the installed app itself. The Electron dev
+  // launcher below only exists in a source checkout.
+  const appExe = process.env.BRO_APP_EXE || '';
+  if (appExe) {
+    if (!fs.existsSync(appExe)) throw new ToolError('BRO voice is not running and the installed app could not be found.');
+    const child = spawn(appExe, ['--background'], { detached: true, stdio: 'ignore', windowsHide: true, shell: false });
+    child.once('error', () => {});
+    child.unref();
+    return { activated: true, kind: 'bro_voice', target: 'BRO voice', mode: 'started' };
+  }
   const electronPath = process.env.BRO_ELECTRON_PATH || path.join(__dirname, '..', 'node_modules', 'electron', 'dist', 'electron.exe');
   if (!fs.existsSync(electronPath)) throw new ToolError('BRO voice is not running and the local Electron launcher was not found.');
   const child = spawn(electronPath, ['desktop/main.js'], { cwd: path.join(__dirname, '..'), detached: true, stdio: 'ignore', windowsHide: true, shell: false });

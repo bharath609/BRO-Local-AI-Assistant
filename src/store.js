@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DEFAULT_MODEL, DEFAULT_PROTOCOL, providerInfo, normalizeProtocol } = require('./provider');
 const { DEFAULT_MODE, normalizeMode } = require('./guardrails');
+const { createSecretBoxFromEnv } = require('./secret');
 
 class ValidationError extends Error {
   constructor(message) {
@@ -58,11 +59,24 @@ function writeJson(file, value) {
   fs.renameSync(temporary, file);
 }
 
-function createStore(dataDir = process.env.BRO_DATA_DIR ? path.resolve(process.env.BRO_DATA_DIR) : path.join(__dirname, '..', 'data')) {
+function createStore(dataDir = process.env.BRO_DATA_DIR ? path.resolve(process.env.BRO_DATA_DIR) : path.join(__dirname, '..', 'data'), { secretKey } = {}) {
   const stateFile = path.join(dataDir, 'state.json');
   const settingsFile = path.join(dataDir, 'settings.json');
   const guardrailsFile = path.join(dataDir, 'guardrails.json');
   fs.mkdirSync(dataDir, { recursive: true });
+
+  // Credentials are encrypted when the Electron shell provides a master key.
+  const secretBox = createSecretBoxFromEnv(secretKey === undefined ? process.env : { BRO_SECRET_KEY: secretKey });
+
+  // Capture environment defaults once. The HTTP server removes provider
+  // credentials from process.env after startup so spawned shells cannot read
+  // them, and these values must survive that.
+  const envDefaults = {
+    baseUrl: process.env.BRO_AI_BASE_URL || '',
+    model: process.env.BRO_AI_MODEL || DEFAULT_MODEL,
+    protocol: process.env.BRO_AI_PROTOCOL || DEFAULT_PROTOCOL,
+    apiKey: process.env.BRO_AI_API_KEY || '',
+  };
 
   function loadState() {
     const state = readJson(stateFile, { projects: [] });
@@ -70,13 +84,30 @@ function createStore(dataDir = process.env.BRO_DATA_DIR ? path.resolve(process.e
     return state;
   }
 
+  function decryptApiKey(value) {
+    if (typeof value !== 'string' || !value) return '';
+    if (!secretBox) return value;
+    return secretBox.decrypt(value);
+  }
+
+  // A settings file written before encryption existed holds a plaintext key.
+  // Upgrade it in place the first time it is read with a master key available.
+  function migrateApiKeyAtRest(settings, storedKey) {
+    if (!secretBox || !storedKey || secretBox.isEncrypted(storedKey)) return;
+    try {
+      writeJson(settingsFile, { ...settings, apiKey: secretBox.encrypt(storedKey) });
+    } catch { /* best effort: the key still works for this session */ }
+  }
+
   function loadSettings() {
     const settings = readJson(settingsFile, {});
+    const storedKey = typeof settings.apiKey === 'string' ? settings.apiKey : '';
+    migrateApiKeyAtRest(settings, storedKey);
     return {
-      baseUrl: typeof settings.baseUrl === 'string' && settings.baseUrl ? settings.baseUrl : (process.env.BRO_AI_BASE_URL || ''),
-      model: typeof settings.model === 'string' && settings.model ? settings.model : (process.env.BRO_AI_MODEL || DEFAULT_MODEL),
-      protocol: normalizeProtocol(typeof settings.protocol === 'string' && settings.protocol ? settings.protocol : (process.env.BRO_AI_PROTOCOL || DEFAULT_PROTOCOL)),
-      apiKey: typeof settings.apiKey === 'string' && settings.apiKey ? settings.apiKey : (process.env.BRO_AI_API_KEY || '')
+      baseUrl: typeof settings.baseUrl === 'string' && settings.baseUrl ? settings.baseUrl : envDefaults.baseUrl,
+      model: typeof settings.model === 'string' && settings.model ? settings.model : envDefaults.model,
+      protocol: normalizeProtocol(typeof settings.protocol === 'string' && settings.protocol ? settings.protocol : envDefaults.protocol),
+      apiKey: decryptApiKey(storedKey) || envDefaults.apiKey
     };
   }
 
@@ -168,7 +199,9 @@ function createStore(dataDir = process.env.BRO_DATA_DIR ? path.resolve(process.e
       }
     }
     if (next.apiKey.length > 2000) throw new ValidationError('Provider API key is too long.');
-    writeJson(settingsFile, next);
+    const persisted = { ...next };
+    if (secretBox && persisted.apiKey) persisted.apiKey = secretBox.encrypt(persisted.apiKey);
+    writeJson(settingsFile, persisted);
     const info = providerInfo(next);
     return { baseUrl: info.baseUrl, model: info.model, protocol: info.protocol, configured: info.configured };
   }

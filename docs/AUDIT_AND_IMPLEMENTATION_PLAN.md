@@ -1,9 +1,20 @@
 # BRO Assistant — Audit Report & DevOps Implementation Plan
 
-Status: **Phase 1 (Audit & Baseline) — complete, awaiting approval**
-Date: 2026-11-19
+Status: **Phases 0–5 complete (guardrail approval decision deferred); publishing and docs remain**
+Date: 2026-11-20 (audit: 2026-11-19)
 Repository: https://github.com/bharath609/BRO-Local-AI-Assistant (public, no releases, no license)
 Blueprint: `Bro_Assistant_DevOps_Blueprint.docx`
+
+> Implementation note (2026-11-20): Electron is now 45.4.1, the backend runs as
+> an Electron `utilityProcess`, data resolves to `%APPDATA%\BRO Assistant` when
+> packaged, the API requires a per-launch token plus loopback Host/Origin
+> checks, provider keys are encrypted with a safeStorage-protected master key,
+> and pages are served with a strict CSP. A 302 MB NSIS installer builds and was
+> verified by silent install, reinstall, launch, and uninstall (user data kept).
+> Verified with 119/119 tests, `npm run smoke` (`SMOKE_OK ... capabilities=42`),
+> and a DevTools check showing the renderer reports "Local server ready" while
+> an anonymous `/api/bootstrap` request returns 401. The installer is unsigned
+> and has not been published yet (no GitHub credentials in this environment).
 
 ---
 
@@ -302,11 +313,11 @@ Total: roughly **2–3 weeks part-time**; critical path is Phase 2 → 5 → cle
 ## 8. Phase checklist
 
 ### Phase 0
-- [ ] Commit/stash existing 14 changes
-- [ ] Back up `data/` (settings, state, guardrails)
-- [ ] Add LICENSE (MIT or Apache-2.0 — user choice)
-- [ ] Add `.github/` skeleton and `docs/`
-- [ ] Repo description/topics; protect `main`
+- [x] Commit/stash existing 14 changes (commit `68a5475`, tag `audit-baseline-2026-11-19`)
+- [x] Back up `data/` (copy in `%TEMP%\bro-pre-packaging-backup-2026-11-19`)
+- [x] Add LICENSE (MIT, "Bharath")
+- [ ] Add `.github/` skeleton and `docs/` (`docs/` done; workflows pending Phase 6)
+- [ ] Repo description/topics; protect `main` (blocked: no GitHub CLI/credentials here)
 
 ### Phase 1
 - [x] Read blueprint
@@ -316,49 +327,51 @@ Total: roughly **2–3 weeks part-time**; critical path is Phase 2 → 5 → cle
 - [x] Produce this report
 
 ### Phase 2
-- [ ] Upgrade Electron to 45, tests green
-- [ ] Add `src/paths.js`; resolve data/resources/logs
-- [ ] Move data to `userData` + copy-only migration
-- [ ] utilityProcess backend + health/instance token
-- [ ] Main chat window + tray
-- [ ] Keep overlay/hotkey/wake intact
-- [ ] Fix whisper/scripts/`activate_bro` packaged paths
-- [ ] Opt-in auto-start; first-run name
-- [ ] User-visible backend/voice error states
+- [x] Upgrade Electron to 45.4.1, tests green
+- [x] Add `src/paths.js`; resolve data/resources/logs
+- [x] Move data to `userData` + copy-only migration
+- [x] utilityProcess backend + health probe
+- [x] Main chat window + tray
+- [x] Keep overlay/hotkey/wake intact
+- [x] Fix whisper/scripts/`activate_bro` packaged paths
+- [x] Opt-in auto-start; first-run name
+- [x] User-visible backend/voice error states
 
 ### Phase 3
-- [ ] API token + Host/Origin validation
-- [ ] safeStorage key encryption + migration
-- [ ] Guardrail decision implemented and documented
-- [ ] CSP + security headers
-- [ ] File logs with redaction + diagnostics export
-- [ ] Audit log rotation; clip path fix
+- [x] API token + Host/Origin validation (`src/auth.js`; per-launch token injected by Electron)
+- [x] safeStorage key encryption + migration (`src/secret.js`, AES-256-GCM)
+- [ ] Guardrail decision implemented and documented (deliberately deferred; behavior unchanged)
+- [x] CSP + security headers (`server.js`)
+- [x] File logs with redaction (`src/logger.js`); diagnostics export still pending
+- [x] Audit log rotation; clip path fix
 
 ### Phase 4
-- [ ] New unit tests (paths, migration, auth, secrets, guardrails)
-- [ ] Desktop `--smoke-test`
-- [ ] `npm run test:ci` on Windows
-- [ ] Optional ESLint gate
+- [x] New unit tests for auth, secrets, logging, and headers (`tests/security.test.js`)
+- [x] New unit tests for paths and data migration (`tests/paths.test.js`)
+- [x] Desktop `--smoke-test` (also asserts the API token is enforced)
+- [x] `npm run test:ci` script exists (119/119 pass locally on Windows)
+- [ ] Optional ESLint gate (deferred; no linter config yet)
 
 ### Phase 5
-- [ ] electron-builder + NSIS config
-- [ ] Icons, app id, resources, asarUnpack
-- [ ] Trim + bundle whisper + models + notices
-- [ ] First-run provider flow
-- [ ] Clean-VM install/first-run/upgrade/uninstall/reinstall tests
+- [x] electron-builder + NSIS config (`package.json` `build`)
+- [x] Icons, app id, resources (`asar: false` so the backend, PowerShell helpers, and whisper binaries stay executable)
+- [x] Bundle whisper + models + English-only Electron locales
+- [ ] First-run provider flow (the existing settings screen is still the entry point)
+- [x] Installer install/upgrade/uninstall verified locally (silent install, reinstall keeps `secret.key`, uninstall keeps `%APPDATA%\BRO Assistant`)
 
 ### Phase 6
-- [ ] `ci.yml` on PR/push
-- [ ] `release.yml` on `v*`
-- [ ] Artifact validation + smoke test
-- [ ] SHA-256 checksums
-- [ ] Least-privilege GitHub Release
+- [x] `ci.yml` on PR/push
+- [x] `release.yml` on `v*`
+- [x] Artifact smoke test in both workflows
+- [x] SHA-256 checksums
+- [x] Least-privilege GitHub Release (`contents: write` only)
+- [ ] Workflows have not run yet (no GitHub CLI/credentials in this environment)
 
 ### Phase 7
-- [ ] README user-first rewrite + screenshots
-- [ ] CONTRIBUTING / CHANGELOG / SECURITY / PRIVACY
+- [ ] README user-first rewrite + screenshots (install section added)
+- [ ] CONTRIBUTING / CHANGELOG / SECURITY / PRIVACY (`docs/SECURITY.md` added)
 - [ ] User guide + troubleshooting
-- [ ] Release notes + known limitations
+- [ ] Release notes + known limitations (`docs/RELEASING.md` added)
 - [ ] Publish v1.0.0
 
 ---

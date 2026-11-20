@@ -14,8 +14,10 @@ const path = require('node:path');
 //   - the command model (base.en by default) for accurate commands
 //   - a small wake model (tiny.en) so “BRO” is recognised in well under a second
 
-const ROOT = path.resolve(__dirname, '..');
-const WHISPER_HOME = process.env.BRO_WHISPER_HOME || path.join(ROOT, 'vendor', 'whisper');
+const { resolvePaths } = require('./paths');
+
+const PATHS = resolvePaths();
+const WHISPER_HOME = PATHS.whisperHome;
 const BIN_DIR = process.env.BRO_WHISPER_BIN_DIR || path.join(WHISPER_HOME, 'Release');
 const SERVER_BIN = path.join(BIN_DIR, 'whisper-server.exe');
 const CLI_BIN = path.join(BIN_DIR, 'whisper-cli.exe');
@@ -71,8 +73,15 @@ function status() {
   const available = remote || (platformSupported() && hasModel && (hasServer || hasCli));
   let reason = '';
   if (!available && !platformSupported()) reason = 'Local voice transcription is only available on Windows.';
-  else if (!available && !hasModel) reason = 'The Whisper model is missing. Run “npm run setup:voice”.';
-  else if (!available && !hasServer && !hasCli) reason = 'The Whisper engine is missing. Run “npm run setup:voice”.';
+  else if (!available && !hasModel) {
+    reason = PATHS.packaged
+      ? 'The voice model is missing. Reinstall BRO Assistant to restore offline voice.'
+      : 'The Whisper model is missing. Run “npm run setup:voice”.';
+  } else if (!available && !hasServer && !hasCli) {
+    reason = PATHS.packaged
+      ? 'The voice engine is missing. Reinstall BRO Assistant to restore offline voice.'
+      : 'The Whisper engine is missing. Run “npm run setup:voice”.';
+  }
   return {
     available,
     engine: 'whisper.cpp',

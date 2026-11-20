@@ -8,15 +8,35 @@ const { providerInfo, warmLocalRuntime } = require('./src/provider');
 const { handleChat, DEFAULT_USER_NAME } = require('./src/assistant');
 const voice = require('./src/voice');
 const guardrails = require('./src/guardrails');
+const { resolvePaths } = require('./src/paths');
+const { authorize } = require('./src/auth');
+const { createLogger } = require('./src/logger');
 
 const DEFAULT_PORT = 4280;
 const requestedPort = Number(process.env.BRO_PORT || DEFAULT_PORT);
 const PORT = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort < 65536 ? requestedPort : DEFAULT_PORT;
 const HOST = '127.0.0.1';
-const store = createStore();
+const PATHS = resolvePaths();
+const store = createStore(PATHS.dataDir);
 const approvals = guardrails.createApprovalStore();
 const audit = guardrails.createAuditLog(path.join(store.dataDir, 'audit.log'));
-const publicDir = path.join(__dirname, 'public');
+const logger = createLogger(PATHS.logsDir);
+const publicDir = PATHS.publicDir;
+// The Electron shell generates this per launch. It is unset for plain
+// `node server.js` and the test suite, which keeps local development simple.
+const API_TOKEN = String(process.env.BRO_API_TOKEN || '').trim();
+// Every process BRO launches (PowerShell helpers, terminals, project commands)
+// inherits this environment. Remove credentials now that they are in memory so
+// a spawned shell cannot read them back out.
+for (const secretName of ['BRO_SECRET_KEY', 'BRO_API_TOKEN', 'BRO_AI_API_KEY']) {
+  try { delete process.env[secretName]; } catch { /* ignore */ }
+}
+const SECURITY_HEADERS = {
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'cross-origin-opener-policy': 'same-origin',
+};
 const ADMIN_ACTIONS = new Set(['set_guardrails', 'lock_controls', 'unlock_controls']);
 const capabilities = ['activate_bro', 'open_url', 'open_app', 'open_start_menu_app', 'open_user_file', 'close_app', 'close_start_menu_app', 'close_named_app', 'close_opened_apps', 'close_website', 'close_window', 'close_all_windows', 'focus_window', 'minimize_window', 'maximize_window', 'restore_window', 'open_desktop_target', 'open_terminal', 'list_projects', 'open_project', 'run_project_command', 'send_keys', 'type_text', 'media_key', 'windows_key', 'scroll', 'screenshot', 'show_desktop', 'refresh_desktop', 'click_element', 'click_first_result', 'sequence', 'open_settings', 'create_folder', 'rename_file', 'recycle_file', 'empty_recycle_bin', 'lock_pc', 'system_power', 'set_guardrails', 'lock_controls', 'unlock_controls'];
 const IMMEDIATE_ACTIONS = new Set([...capabilities].filter((type) => !['list_projects', 'run_project_command'].includes(type)));
@@ -24,7 +44,7 @@ const userProfile = Object.freeze({ displayName: DEFAULT_USER_NAME });
 
 function json(response, status, value) {
   const body = JSON.stringify(value);
-  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' });
+  response.writeHead(status, { ...SECURITY_HEADERS, 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' });
   response.end(body);
 }
 
@@ -374,6 +394,8 @@ async function bringOpenedThingForward(action, outcome) {
 async function route(request, response) {
   const parsed = new URL(request.url, `http://${HOST}`);
   const pathname = parsed.pathname;
+  const rejection = authorize({ pathname, method: request.method, headers: request.headers, token: API_TOKEN });
+  if (rejection) return json(response, rejection.status, { error: rejection.error });
   if (request.method === 'GET' && pathname === '/api/bootstrap') {
     const settings = store.loadSettings();
     return json(response, 200, { appName: 'BRO Local AI Assistant', user: userProfile, provider: providerInfo(settings), projects: store.listProjects(), capabilities, voice: voice.status(), guardrails: publicGuardrails(), approvals: approvals.list() });
@@ -436,7 +458,7 @@ async function route(request, response) {
     if (audio.length < 44) throw new ValidationError('The recording was empty.');
     if (process.env.BRO_VOICE_SAVE_CLIPS === '1') {
       try {
-        const dir = path.join(__dirname, 'data', 'voice-clips');
+        const dir = path.join(store.dataDir, 'voice-clips');
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(path.join(dir, `wake-${new Date().toISOString().replace(/[:.]/g, '-')}.wav`), audio);
       } catch (_) { /* diagnostics are best effort */ }
@@ -546,13 +568,14 @@ function serveStatic(pathname, response) {
   try { stat = fs.statSync(file); } catch { return json(response, 404, { error: 'Not found.' }); }
   if (!stat.isFile()) return json(response, 404, { error: 'Not found.' });
   const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
-  response.writeHead(200, { 'content-type': contentTypes[path.extname(file).toLowerCase()] || 'application/octet-stream' });
+  response.writeHead(200, { ...SECURITY_HEADERS, 'content-type': contentTypes[path.extname(file).toLowerCase()] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(response);
 }
 
 const server = http.createServer((request, response) => {
   route(request, response).catch((error) => {
     const status = error.statusCode || 500;
+    if (status >= 500) logger.error(`request failed: ${request.method} ${request.url}`, (error && (error.stack || error.message)) || String(error));
     json(response, status, { error: status >= 500 ? 'Internal server error.' : error.message });
   });
 });
@@ -562,10 +585,19 @@ process.on('exit', () => voice.shutdown());
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => { voice.shutdown(); process.exit(0); });
 }
+process.on('uncaughtException', (error) => {
+  logger.error('uncaught exception', (error && (error.stack || error.message)) || String(error));
+  console.error(error);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  logger.error('unhandled rejection', (reason && (reason.stack || reason.message)) || String(reason));
+});
 
 if (require.main === module) {
   server.listen(PORT, HOST, () => {
     console.log(`BRO Local AI Assistant listening at http://${HOST}:${PORT}`);
+    logger.info(`BRO backend listening on ${HOST}:${PORT}`, { tokenProtected: Boolean(API_TOKEN), packaged: PATHS.packaged, dataDir: store.dataDir });
     // Warm the Start Menu index in the background so the first "open Chrome" of a
     // session does not have to walk the shortcuts folder.
     setTimeout(() => { try { tools.warmInstalledApps(); } catch { /* ignore */ } }, 1_500);
@@ -584,4 +616,4 @@ if (require.main === module) {
     }, 4_000);
   });
 }
-module.exports = { server, executeAction, store, HOST, PORT };
+module.exports = { server, executeAction, store, logger, HOST, PORT };

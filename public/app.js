@@ -345,4 +345,7 @@
     $('#refresh-guardrails')?.addEventListener('click', async () => { try { const data = await api('/api/guardrails'); applyGuardrails(data.guardrails, data.approvals); await loadAudit(); showToast('Guardrails refreshed.'); } catch (error) { showToast(errorMessage(error)); } });
   }
   loadSavedMessages(); loadContext(); wireEvents(); setupVoice(); setView('chat'); refreshBootstrap();
+  if (window.broDesktop && typeof window.broDesktop.onNavigate === 'function') {
+    window.broDesktop.onNavigate(view => { if (viewCopy[view]) setView(view); });
+  }
 })();

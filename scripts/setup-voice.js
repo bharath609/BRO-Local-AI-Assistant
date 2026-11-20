@@ -16,10 +16,13 @@ const HOME = process.env.BRO_WHISPER_HOME || path.join(ROOT, 'vendor', 'whisper'
 const RELEASE_DIR = path.join(HOME, 'Release');
 const SERVER_BIN = path.join(RELEASE_DIR, 'whisper-server.exe');
 const MODEL = process.env.BRO_WHISPER_MODEL || path.join(HOME, 'models', 'ggml-base.en.bin');
+const TINY_MODEL = process.env.BRO_WHISPER_TINY_MODEL || path.join(HOME, 'models', 'ggml-tiny.en.bin');
 const ENGINE_URL = process.env.BRO_WHISPER_ENGINE_URL
   || 'https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip';
 const MODEL_URL = process.env.BRO_WHISPER_MODEL_URL
   || 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin';
+const TINY_MODEL_URL = process.env.BRO_WHISPER_TINY_MODEL_URL
+  || 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin';
 
 function download(url, destination, redirects = 0) {
   return new Promise((resolve, reject) => {
@@ -80,12 +83,26 @@ function expand(archive, destination) {
     console.log(`Engine installed: ${path.relative(ROOT, SERVER_BIN)}`);
   }
 
-  if (fs.existsSync(MODEL)) {
-    console.log(`Model already installed: ${path.relative(ROOT, MODEL)}`);
-  } else {
-    console.log(`Downloading ${path.basename(MODEL)} (about 150 MB)…`);
-    await download(MODEL_URL, MODEL);
-    console.log(`Model installed: ${path.relative(ROOT, MODEL)}`);
+  const models = [
+    { file: MODEL, url: MODEL_URL, label: 'command model', size: 'about 150 MB' },
+    {
+      file: TINY_MODEL,
+      url: TINY_MODEL_URL,
+      label: 'wake model',
+      size: 'about 75 MB',
+      // BRO_WHISPER_TINY_MODEL points at a custom model that is already present.
+      skip: Boolean(process.env.BRO_WHISPER_TINY_MODEL),
+    },
+  ];
+
+  for (const model of models) {
+    if (model.skip || fs.existsSync(model.file)) {
+      console.log(`Model already installed: ${path.relative(ROOT, model.file)}`);
+      continue;
+    }
+    console.log(`Downloading the ${model.label} (${model.size})…`);
+    await download(model.url, model.file);
+    console.log(`Model installed: ${path.relative(ROOT, model.file)}`);
   }
 
   console.log('\nBRO voice is ready. Start the app with “npm start” or “npm run desktop”.');

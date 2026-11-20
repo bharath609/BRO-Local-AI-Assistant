@@ -1,18 +1,91 @@
 {
   "name": "bro-local-ai-assistant",
+  "productName": "BRO Assistant",
   "version": "1.0.0",
+  "description": "A local-first Windows AI assistant with offline voice commands and approved desktop actions.",
+  "license": "MIT",
+  "author": {
+    "name": "Bharath"
+  },
   "private": true,
   "type": "commonjs",
-  "engines": { "node": ">=22" },
+  "main": "desktop/main.js",
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test",
+    "test:ci": "node --test --test-reporter=spec",
     "setup:voice": "node scripts/setup-voice.js",
+    "icons": "node scripts/make-icons.js",
+    "smoke": "electron desktop/main.js --smoke-test",
     "desktop": "electron desktop/main.js",
-    "desktop:dev": "electron desktop/main.js"
+    "desktop:dev": "electron desktop/main.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis"
   },
   "devDependencies": {
-    "electron": "^37.0.0"
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.bro.assistant",
+    "productName": "BRO Assistant",
+    "copyright": "Copyright (c) 2026 Bharath",
+    "asar": false,
+    "electronLanguages": [
+      "en-US"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "server.js",
+      "src/**/*",
+      "public/**/*",
+      "desktop/**/*",
+      "package.json",
+      "LICENSE"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/whisper",
+        "to": "whisper"
+      },
+      {
+        "from": "scripts",
+        "to": "scripts"
+      },
+      {
+        "from": "assets",
+        "to": "assets"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "BRO-Assistant-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BRO Assistant",
+      "deleteAppDataOnUninstall": false,
+      "license": "LICENSE"
+    }
   }
 }

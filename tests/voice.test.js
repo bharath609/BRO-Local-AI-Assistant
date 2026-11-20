@@ -248,7 +248,8 @@ test('Ctrl+Alt+B stays a one-shot global shortcut handled by the popup', () => {
   assert.match(mainSource, /RegisterHotKey/);
   assert.match(mainSource, /webContents\.send\('bro-hotkey'\)/);
   assert.match(mainSource, /setPermissionRequestHandler/);
-  assert.match(mainSource, /callback\(permission === 'media'\)/);
+  assert.match(mainSource, /setPermissionCheckHandler/);
+  assert.match(mainSource, /permission === 'media' && requesting\.startsWith\(appOrigin\)/);
   assert.match(mainSource, /backgroundThrottling: false/);
   assert.match(overlaySource, /onHotkey/);
   assert.match(overlaySource, /if \(state\.phase !== 'idle'\) return/);
