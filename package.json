@@ -1,7 +1,7 @@
 {
   "name": "bro-local-ai-assistant",
   "productName": "BRO Assistant",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A local-first Windows AI assistant with offline voice commands and approved desktop actions.",
   "license": "MIT",
   "author": {
