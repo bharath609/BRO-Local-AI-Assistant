@@ -1,7 +1,7 @@
 # BRO Assistant — Audit Report & DevOps Implementation Plan
 
-Status: **Phases 0–6 complete (guardrail approval decision deferred); v1.0.0 published; docs polish remains**
-Date: 2026-11-20 (audit: 2026-11-19)
+Status: **Phases 0–6 complete (guardrail approval decision deferred); v1.0.0 published; Phase 8 AI brain complete (132/132 tests)**
+Date: 2026-11-21 (audit: 2026-11-19)
 Repository: https://github.com/bharath609/BRO-Local-AI-Assistant (public, MIT, v1.0.0 released)
 Blueprint: `Bro_Assistant_DevOps_Blueprint.docx`
 
@@ -376,6 +376,23 @@ Total: roughly **2–3 weeks part-time**; critical path is Phase 2 → 5 → cle
 - [ ] User guide + troubleshooting
 - [x] Release notes + known limitations (`docs/RELEASING.md` added)
 - [x] Publish v1.0.0 (installer 316,777,766 bytes + `SHA256SUMS.txt` on GitHub Releases)
+
+### Phase 8 — true AI brain and chat lifecycle (2026-11-21)
+
+- [x] Greetings and capability questions answered by the configured model, with a short local fallback
+- [x] Full command registry moved behind an explicit “command reference” / “list all commands” request
+- [x] Hybrid routing: deterministic parser first, AI brain for conversation and unmapped actions
+- [x] `src/tool-schema.js`: 20 tools with strict argument validation; destructive actions excluded
+- [x] `src/brain.js`: native tool calling, JSON protocol fallback, bounded loop (4 steps / 6 calls)
+- [x] `src/history.js`: bounded, sanitised conversation history
+- [x] `src/provider.js`: `chatComplete()` with tools, per-call timeout, Responses/Ollama handling
+- [x] `server.js`: `runChatTool`, shared `chatArgs`, `/api/chat`, new `/api/chat/stream` (NDJSON)
+- [x] `public/app.js`: streaming client, abort/timeout, explicit busy lifecycle, `finally` reset
+- [x] `public/styles.css`: `.typing-indicator[hidden]{display:none}` (root cause of the stuck indicator)
+- [x] Tests: brain, tool validation, fallback, loop bound, history, UI regression (132/132 pass)
+- [x] End-to-end verification: streaming (`status → result → done`) and real-Chromium lifecycle
+- [x] Docs: `docs/AI_BRAIN.md`, README conversation section
+- [ ] Repackage/sign a new installer after the next release decision
 
 ---
 

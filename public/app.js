@@ -5,7 +5,7 @@
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const CHAT_STORAGE_KEY = 'bro-chat-history-v1';
   const CONTEXT_STORAGE_KEY = 'bro-last-target-v1';
-  const state = { view: 'chat', messages: [], projects: [], settings: {}, user: { displayName: 'Bharath' }, context: {}, online: false, readAloud: false, busy: false, recognition: null, voice: null, guardrails: { mode: 'guarded', locked: false, pending: 0 }, approvals: [] };
+  const state = { view: 'chat', messages: [], projects: [], settings: {}, user: { displayName: 'Bharath' }, context: {}, online: false, readAloud: false, busy: false, turn: 0, chatAbort: null, recognition: null, voice: null, guardrails: { mode: 'guarded', locked: false, pending: 0 }, approvals: [] };
 
   const els = {
     views: $$('.view'), nav: $$('.nav-item'), title: $('#view-title'), eyebrow: $('#view-eyebrow'), welcome: $('#welcome-state'), welcomeHeading: $('#welcome-heading'), messages: $('#messages'), actionFeed: $('#action-feed'), typing: $('#typing-indicator'), input: $('#message-input'), chatForm: $('#chat-form'), send: $('#send-button'), mic: $('#mic-button'), speaker: $('#speaker-toggle'), connectionDot: $('#connection-dot'), connectionLabel: $('#connection-label'), connectionDetail: $('#connection-detail'), serverAlert: $('#server-alert'), serverAlertText: $('#server-alert-text'), toast: $('#toast'), projects: $('#project-list'), projectCount: $('#project-count'), projectForm: $('#project-form'), projectFormPanel: $('#project-form-panel'), projectMessage: $('#project-form-message'), settingsForm: $('#settings-form'), settingsMessage: $('#settings-message'), guardModes: $('#guard-modes'), guardBadge: $('#guard-mode-badge'), guardLock: $('#guard-lock'), guardCount: $('#guard-count'), approvalList: $('#approval-list'), auditList: $('#audit-list')
@@ -32,8 +32,23 @@
     $('.sidebar')?.classList.remove('open');
     if (view === 'guardrails') { renderApprovals(); loadAudit(); }
   }
-  function setBusy(busy, showThinking = busy) { state.busy = busy; els.send.disabled = busy; els.input.disabled = busy; els.typing.hidden = !showThinking; }
-  function isLightConversation(message) { const value = text(message).trim(); const greeting = /\b(?:hey|hi|hello|welcome|good\s+(?:morning|afternoon|evening))\b/i.test(value); const action = /https?:\/\/|\b(?:open|visit|go\s+to|run|execute|list|show|search|find|google|status|health|help|activate|wake\s+up)\b/i.test(value); return greeting && !action; }
+  // The typing bubble is a single, explicitly controlled element. `hidden` is
+  // always written together with `aria-hidden`, and the stylesheet has a
+  // `.typing-indicator[hidden]` rule, so a CSS `display:flex` can never leave it
+  // on screen after a finished or failed request.
+  function setBusy(busy, showThinking = busy) {
+    state.busy = busy;
+    els.send.disabled = busy;
+    els.input.disabled = busy;
+    els.typing.hidden = !showThinking;
+    els.typing.setAttribute('aria-hidden', showThinking ? 'false' : 'true');
+    document.body.classList.toggle('is-busy', busy);
+    if (!showThinking) setStatus('Thinking');
+  }
+  function setStatus(label) {
+    const node = els.typing.querySelector('em');
+    if (node) node.textContent = text(label, 'Thinking');
+  }
   function isActivateBroCommand(message) { return /^(?:please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+)?(?:activate|start|wake\s+up)\s+bro(?:\s+command)?[.!?]*$/i.test(text(message).trim()); }
   function scheduleActivateBro(message) {
     if (!isActivateBroCommand(message) || state.busy) return;
@@ -59,11 +74,63 @@
     items.forEach(item => { const role = item.role === 'user' ? 'user' : 'assistant'; const value = item.content ?? item.message ?? item.text ?? item.reply; if (value) addMessage(role, value, item.createdAt ? new Date(item.createdAt) : new Date()); });
   }
   function errorMessage(error) { return error?.message || 'Something went wrong. Please try again.'; }
-  async function api(path, options = {}) {
-    const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
-    let data = null; try { data = await response.json(); } catch (_) { /* non-JSON response */ }
-    if (!response.ok) throw new Error(data?.error || data?.message || `Request failed (${response.status})`);
-    return data || {};
+  async function api(path, options = {}, { timeoutMs = 30_000 } = {}) {
+    const controller = options.signal ? null : new AbortController();
+    const signal = options.signal || (controller ? controller.signal : undefined);
+    const timer = controller ? setTimeout(() => controller.abort(), Math.max(1_000, timeoutMs)) : null;
+    try {
+      const response = await fetch(path, { ...options, signal, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+      let data = null; try { data = await response.json(); } catch (_) { /* non-JSON response */ }
+      if (!response.ok) throw new Error(data?.error || data?.message || `Request failed (${response.status})`);
+      return data || {};
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw new Error('BRO stopped waiting for the backend. Please try again.');
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  // Streams one chat turn. Status events update the typing bubble while tools
+  // run; the final payload matches `/api/chat`, and `done` always arrives before
+  // the stream closes so the caller can return the UI to IDLE.
+  async function streamChat(body, { signal, onStatus } = {}) {
+    const response = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!response.ok || !response.body) throw new Error(`Request failed (${response.status})`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let result = null;
+    let done = false;
+    while (!done) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let index = buffer.indexOf('\n');
+      while (index >= 0) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        index = buffer.indexOf('\n');
+        if (!line) continue;
+        let event = null;
+        try { event = JSON.parse(line); } catch { continue; }
+        if (event.type === 'status') { if (onStatus) onStatus(event.message); }
+        else if (event.type === 'result') { result = event.payload; }
+        else if (event.type === 'done') { done = true; }
+        else if (event.type === 'error') {
+          const failure = new Error(event.error || 'Chat request failed.');
+          failure.noRetry = true;
+          throw failure;
+        }
+      }
+    }
+    if (!result) throw new Error('The backend closed the chat without a reply.');
+    return result;
   }
   // ---- Guardrails UI -------------------------------------------------------
   const GUARD_COPY = {
@@ -272,10 +339,29 @@
 
   async function sendMessage(value = els.input.value) {
     const message = text(value).trim(); if (!message || state.busy) return;
-    addMessage('user', message); els.input.value = ''; resizeInput(); setBusy(true, !isLightConversation(message));
+    addMessage('user', message); els.input.value = ''; resizeInput();
+    const turn = ++state.turn;
+    const controller = new AbortController();
+    state.chatAbort = controller;
+    // A full tool round trip (model, tool, model) can take a while, but it must
+    // never wait forever. The abort guarantees the interface returns to IDLE.
+    const timer = setTimeout(() => controller.abort(), 170_000);
+    setBusy(true, true); setStatus('Thinking…');
     try {
       const history = state.messages.slice(0, -1).slice(-20);
-      const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message, history, context: state.context }) });
+      const payload = { message, history, context: state.context };
+      let data;
+      try {
+        data = await streamChat(payload, {
+          signal: controller.signal,
+          onStatus: (label) => { if (turn === state.turn) setStatus(label); },
+        });
+      } catch (streamError) {
+        if (streamError.name === 'AbortError' || streamError.noRetry) throw streamError;
+        // Older backend or a dropped stream: fall back to the plain endpoint.
+        data = await api('/api/chat', { method: 'POST', body: JSON.stringify(payload), signal: controller.signal }, { timeoutMs: 170_000 });
+      }
+      if (turn !== state.turn) return;
       if (data.context && typeof data.context === 'object') { state.context = data.context; saveContext(); }
       applyGuardrails(data.guardrails, data.approvals);
       const reply = getChatReply(data); if (reply) addMessage('assistant', reply, new Date(), true);
@@ -284,8 +370,16 @@
       if (!reply && !getActions(data).length && !(data.approvals || []).length) addMessage('assistant', 'I received that, but the backend did not return a message.');
       if ((data.approvals || []).length) loadAudit();
     }
-    catch (error) { addMessage('assistant', `I couldn’t reach the local backend. ${errorMessage(error)}`); setConnection(false, 'Chat request failed'); }
-    finally { setBusy(false); els.input.focus(); scrollChat(); }
+    catch (error) {
+      if (turn !== state.turn) return;
+      if (error && error.name === 'AbortError') addMessage('assistant', 'That took too long, so I stopped the request. Please try again.');
+      else { addMessage('assistant', `I couldn’t finish that. ${errorMessage(error)}`); setConnection(false, 'Chat request failed'); }
+    }
+    finally {
+      clearTimeout(timer);
+      if (state.chatAbort === controller) state.chatAbort = null;
+      if (turn === state.turn) { setBusy(false); els.input.focus(); scrollChat(); }
+    }
   }
   function resizeInput() { els.input.style.height = 'auto'; els.input.style.height = `${Math.min(els.input.scrollHeight, 140)}px`; }
   function renderProjects() {
@@ -344,7 +438,7 @@
     els.guardLock?.addEventListener('click', toggleGuardLock);
     $('#refresh-guardrails')?.addEventListener('click', async () => { try { const data = await api('/api/guardrails'); applyGuardrails(data.guardrails, data.approvals); await loadAudit(); showToast('Guardrails refreshed.'); } catch (error) { showToast(errorMessage(error)); } });
   }
-  loadSavedMessages(); loadContext(); wireEvents(); setupVoice(); setView('chat'); refreshBootstrap();
+  loadSavedMessages(); loadContext(); wireEvents(); setupVoice(); setView('chat'); setBusy(false, false); refreshBootstrap();
   if (window.broDesktop && typeof window.broDesktop.onNavigate === 'function') {
     window.broDesktop.onNavigate(view => { if (viewCopy[view]) setView(view); });
   }

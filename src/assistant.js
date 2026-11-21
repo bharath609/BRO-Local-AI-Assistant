@@ -1,7 +1,9 @@
 const { validateHttpUrl, normalizeDesktopTarget, resolveWindowsTarget, findInstalledApp, findUserFile, USER_FILE_FOLDERS, findYouTubeVideo } = require('./tools');
-const { providerInfo, chatCompletion, isLocalBaseUrl } = require('./provider');
+const { providerInfo } = require('./provider');
 const { matchApplicationSkill } = require('./skills/application-control');
 const { DEFAULT_MODE, normalizeMode } = require('./guardrails');
+const brain = require('./brain');
+const { normalizeHistory } = require('./history');
 const COMMAND_CATALOG = require('./command-catalog.json');
 const APP_CATALOG = require('./app-catalog.json');
 
@@ -572,7 +574,148 @@ function auditReply(entries) {
   return `Here is the recent activity log.\n${lines.join('\n')}`;
 }
 
-async function handleChat({ message, history = [], projects = [], settings, user, context, requestContext, lastTarget: directLastTarget, guardrails, audit = [], pendingApprovals = 0 }) {
+const WINDOWS_KEY_LETTERS = Object.freeze({
+  start: '', taskview: 'tab', quick_settings: 'a', run: 'r', clipboard: 'v',
+  settings: 'i', explorer: 'e', lock: 'l', show_desktop: 'd',
+});
+
+const MEDIA_KEY_NAMES = Object.freeze({
+  playpause: 'play_pause', play: 'play', pause: 'pause', next: 'next',
+  previous: 'previous', stop: 'stop', mute: 'mute',
+  volumeup: 'volume_up', volumedown: 'volume_down',
+});
+
+function siteUrlFor(value) {
+  try { return validateHttpUrl(value); } catch { /* not a URL, try a site name */ }
+  try { return resolveSiteUrl(value); } catch { return null; }
+}
+
+// Translates one validated AI tool call into an action the existing executor and
+// guardrails already understand. Returns null when the request cannot be mapped,
+// which tells the model to ask the user for a clearer instruction instead.
+function toolActionFor(name, args = {}, { projects = [], lastTarget = null } = {}) {
+  switch (name) {
+    case 'open_app': {
+      const entry = resolveAppEntry(args.name);
+      if (entry && !entry.protected) {
+        const candidates = Array.isArray(entry.desktop) && entry.desktop.length ? entry.desktop : [entry.label];
+        if (findInstalledApp(candidates)) {
+          return { action: { id: 'open_app', type: 'open_app', args: { id: entry.id }, label: `Open ${entry.label}` }, status: `Opening ${entry.label}…` };
+        }
+      }
+      const installed = args.name.length >= 2 ? findInstalledApp(args.name) : null;
+      if (installed && installed.score >= 70) {
+        return { action: { id: 'open_start_menu_app', type: 'open_start_menu_app', args: { name: args.name }, label: `Open ${installed.name}` }, status: `Opening ${installed.name}…` };
+      }
+      return null;
+    }
+
+    case 'open_website': {
+      const url = siteUrlFor(args.target);
+      if (!url) return null;
+      const label = siteLabel(url) || url;
+      return { action: { id: 'open_url', type: 'open_url', args: { url }, label: `Open ${label}` }, status: `Opening ${label}…` };
+    }
+
+    case 'search_web': {
+      const url = `https://www.google.com/search?q=${encodeURIComponent(args.query)}`;
+      return { action: { id: 'open_url', type: 'open_url', args: { url }, label: `Search the web for ${args.query}` }, status: `Searching the web for “${args.query}”…` };
+    }
+
+    case 'search_youtube': {
+      const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(args.query)}`;
+      return { action: { id: 'open_url', type: 'open_url', args: { url }, label: `Search YouTube for ${args.query}` }, status: `Searching YouTube for “${args.query}”…` };
+    }
+
+    case 'open_windows_item': {
+      const key = normalizeDesktopTarget(args.name);
+      if (!key) return null;
+      const descriptor = resolveWindowsTarget(key);
+      return { action: { id: 'open_desktop_target', type: 'open_desktop_target', args: { target: descriptor.key }, label: `Open ${descriptor.label}` }, status: `Opening ${descriptor.label}…` };
+    }
+
+    case 'close_app': {
+      const entry = resolveAppEntry(args.name);
+      if (entry && !entry.protected) {
+        return { action: { id: 'close_app', type: 'close_app', args: { id: entry.id }, label: `Close ${entry.label}` }, status: `Closing ${entry.label}…` };
+      }
+      const url = siteUrlFor(args.name);
+      if (url) {
+        const label = siteLabel(url) || args.name;
+        return { action: { id: 'close_website', type: 'close_website', args: { name: args.name, label, url }, label: `Close the ${label} tab` }, status: `Closing the ${label} tab…` };
+      }
+      return { action: { id: 'close_named_app', type: 'close_named_app', args: { name: args.name }, label: `Close ${args.name}` }, status: `Closing ${args.name}…` };
+    }
+
+    case 'control_window': {
+      if (!lastTarget) return { reply: 'Which window should I use? Open something first, then ask me again.' };
+      const label = lastTargetLabel(lastTarget);
+      const verb = args.mode === 'minimize' ? 'Minimize' : args.mode === 'maximize' ? 'Maximize' : args.mode === 'restore' ? 'Restore' : 'Bring';
+      return {
+        action: { id: `${args.mode}_window`, type: `${args.mode}_window`, args: { target: { label, kind: lastTarget.kind } }, label: `${verb} ${label}` },
+        status: `${verb}ing ${label}…`,
+      };
+    }
+
+    case 'media_control': {
+      const key = MEDIA_KEY_NAMES[args.key] || args.key;
+      return { action: { id: 'media_key', type: 'media_key', args: { key }, label: `Media ${args.key}` }, status: `Sending ${args.key}…` };
+    }
+
+    case 'scroll_page': {
+      const amount = args.amount || 3;
+      return { action: { id: 'scroll', type: 'scroll', args: { direction: args.direction, amount, ...(lastTarget ? { target: { label: lastTargetLabel(lastTarget), kind: lastTarget.kind } } : {}) }, label: `Scroll ${args.direction}` }, status: `Scrolling ${args.direction}…` };
+    }
+
+    case 'take_screenshot':
+      return { action: { id: 'screenshot', type: 'screenshot', args: {}, label: 'Take a screenshot' }, status: 'Taking a screenshot…' };
+
+    case 'type_text':
+      return { action: { id: 'type_text', type: 'type_text', args: { text: args.text, ...(lastTarget ? { target: { label: lastTargetLabel(lastTarget), kind: lastTarget.kind } } : {}) }, label: `Type ${args.text.slice(0, 40)}` }, status: 'Typing…' };
+
+    case 'press_keys':
+      return { action: { id: 'send_keys', type: 'send_keys', args: { keys: args.keys, ...(lastTarget ? { target: { label: lastTargetLabel(lastTarget), kind: lastTarget.kind } } : {}) }, label: `Press ${args.keys}` }, status: 'Pressing keys…' };
+
+    case 'press_windows_key': {
+      const keys = WINDOWS_KEY_LETTERS[args.keys] ?? '';
+      return { action: { id: 'windows_key', type: 'windows_key', args: { keys }, label: `Windows ${args.keys}` }, status: `Opening ${args.keys.replace(/_/g, ' ')}…` };
+    }
+
+    case 'create_folder':
+      return { action: { id: 'create_folder', type: 'create_folder', args: { name: args.name, ...(args.folder ? { folder: args.folder } : {}) }, label: `Create folder ${args.name}` }, status: `Creating “${args.name}”…` };
+
+    case 'open_windows_settings': {
+      const skill = matchApplicationSkill(`open ${args.name} settings`, { lastTarget });
+      if (skill && skill.action && skill.action.type === 'open_settings') {
+        return { action: skill.action, status: skill.reply || 'Opening Windows settings…' };
+      }
+      return null;
+    }
+
+    case 'open_terminal':
+      return { action: { id: 'open_terminal', type: 'open_terminal', args: {}, label: 'Open a terminal' }, status: 'Opening a terminal…' };
+
+    case 'list_projects':
+      return { reply: projects.length ? projects.map((project) => `${project.name} (${project.root})`).join('\n') : 'No projects are registered yet.' };
+
+    case 'open_project': {
+      const project = projectByName(projects, args.name);
+      if (!project) return { reply: `I could not find a registered project named “${args.name}”.` };
+      return { action: { id: 'open_project', type: 'open_project', args: { projectId: project.id }, label: `Open ${project.name}` }, status: `Opening ${project.name}…` };
+    }
+
+    case 'click_first_result':
+      return { action: { id: 'click_first_result', type: 'click_first_result', args: { unread: Boolean(args.unread), ...(lastTarget ? { target: { label: lastTargetLabel(lastTarget), kind: lastTarget.kind } } : {}) }, label: args.unread ? 'Click the first unread item' : 'Click the first result' }, status: 'Clicking the first result…' };
+
+    case 'show_desktop':
+      return { action: { id: 'show_desktop', type: 'show_desktop', args: {}, label: 'Show the desktop' }, status: 'Showing the desktop…' };
+
+    default:
+      return null;
+  }
+}
+
+async function handleChat({ message, history = [], projects = [], settings, user, context, requestContext, lastTarget: directLastTarget, guardrails, audit = [], pendingApprovals = 0, runAction, onStatus }) {
   const incomingContext = context || requestContext || (directLastTarget ? { lastTarget: directLastTarget } : {});
   const lastTarget = canonicalContextTarget(incomingContext.lastTarget, projects);
   const result = baseResult(settings, lastTarget, incomingContext);
@@ -582,8 +725,23 @@ async function handleChat({ message, history = [], projects = [], settings, user
   }
   const text = message.trim();
   const userName = displayNameFor(user);
+  const conversation = normalizeHistory(history);
   if (isGreeting(text)) {
-    result.reply = `Hey ${userName}! I’m BRO, your local assistant. I’m here and ready whenever you are. I’ll only take action when you explicitly ask me to.`;
+    // Qwen writes the greeting when a provider is configured; the local sentence
+    // is the instant fallback. Either way it is a welcome, never a command list.
+    if (result.provider.configured) {
+      const greeting = await brain.quickReply({
+        settings,
+        userName,
+        history: conversation,
+        message: text,
+        instruction: 'The user just greeted you. Greet them back warmly in one or two short sentences, say you are their BRO desktop assistant, and invite them to say what they need. Do not list capabilities or commands.',
+        timeoutMs: 8_000,
+      });
+      result.reply = greeting.ok && greeting.reply ? greeting.reply : brain.greetingText(userName);
+    } else {
+      result.reply = brain.greetingText(userName);
+    }
     return result;
   }
   let commandText = stripCommandPoliteness(stripGreetingPrefix(text));
@@ -666,7 +824,24 @@ async function handleChat({ message, history = [], projects = [], settings, user
     return result;
   }
 
-  if (/^(help|what can you do|commands?)\??$/i.test(commandText)) {
+  // "What can you do?" is a conversation, not a command reference. The complete
+  // list is opt-in with "command reference" or "list all commands".
+  if (/^(?:help|what\s+can\s+you\s+do|what\s+are\s+your\s+capabilit(?:y|ies)|how\s+can\s+you\s+help(?:\s+me)?|who\s+are\s+you|what\s+are\s+you|tell\s+me\s+about\s+yourself)\??[.!]?$/i.test(commandText)) {
+    result.reply = brain.capabilitySummary(userName);
+    if (result.provider.configured) {
+      const answer = await brain.quickReply({
+        settings,
+        userName,
+        history: conversation,
+        message: text,
+        instruction: 'The user asked what you can do. Answer conversationally in two to four short sentences, in your own voice, with at most three concrete examples. Never list every command, never mention a command registry, and do not use markdown.',
+        timeoutMs: 12_000,
+      });
+      if (answer.ok && answer.reply) result.reply = answer.reply;
+    }
+    return result;
+  }
+  if (/^(?:command\s+reference|full\s+command\s+list|(?:list|show)\s+(?:me\s+)?(?:all|every|the\s+(?:full|complete))\s+(?:the\s+)?commands?)$/i.test(commandText)) {
     result.reply = 'Everything I do is under your guardrails. Say “guardrails status”, “guardrails strict”, “guardrails guarded”, “guardrails trusted”, “lock everything”, “unlock controls”, or “show the audit log”. I can greet you, activate the BRO voice popup, open any app installed on this PC ("open Telegram", "open Chrome"), open known sites ("open Gmail", "open YouTube"), open Windows folders and tools ("open Downloads", "open Task Manager"), search the web or YouTube, open a terminal, list or open registered projects, and run a named project profile after approval. Desktop apps are checked before websites; say "open GitHub website" if you want the page instead of the app. Opened windows come to the front and are enlarged to fill the screen. After I open a site, name a video or search and I stay on that site: "play lo-fi beats" plays the top YouTube video, "find lo-fi beats" shows results. I can also find and open your files by name ("open report.pdf", "open my resume"). I control the window I opened last: "check it once", "bring that back", "open that video", "minimize it", "maximize it". I can close things: "close Telegram", "close Gmail" (that tab), "close this window", "close the tab in front", "close that", "close everything" or "close all windows". I also control playback and apps: "pause", "stop", "play", "forward" or "backward" (10 seconds each), "skip forward 30 seconds", "play the next video", "volume up", "mute", "captions on", "fullscreen", "next tab", "zoom in", "scroll down" or "scroll up" (works in Gmail, YouTube, and other long lists), "type hello", "click first result", "save", "print", Gmail and Outlook searches, WhatsApp chats, Google Drive, Office and VS Code shortcuts, "take a screenshot", Windows Settings pages, "create a folder called Reports", and power actions. I also have local PC controls: "open start menu", "show task view", "open quick settings", "open run dialog", "show clipboard", "refresh", "refresh the desktop", "switch window", "open control panel", "open device manager", "open programs and features", "open network connections", "open system information", "open event viewer", "open disk management", "open services", "open printers", "open recycle bin", and "open this pc". Shutdown, restart, deleting a file, and emptying the Recycle Bin ask for a spoken "yes" first, and I never send messages or share your screen automatically. Say "sleep" or "go to sleep mode" and I disappear until you say "BRO" or press Ctrl + Alt + B.';
     return result;
   }
@@ -1071,33 +1246,44 @@ async function handleChat({ message, history = [], projects = [], settings, user
     return result;
   }
 
-  // A PC action BRO could not map. The local model has no access to the
-  // computer, so sending this to it only adds a slow, useless round-trip.
-  if (looksLikePcAction(commandText)) {
-    result.reply = `I heard “${commandText}”, but I don’t know how to do that yet. Try “open <app>”, “scroll down”, or say “help” for the full list.`;
+  // Offline fallback for a PC action the deterministic parser could not map.
+  // With a provider configured the request goes to the AI brain below instead,
+  // which can choose a registered tool or ask a clarifying question.
+  if (!result.provider.configured) {
+    if (looksLikePcAction(commandText)) {
+      result.reply = `I heard “${commandText}”, but I don’t know how to do that yet. Try “open <app>”, “scroll down”, or say “help” for the full list.`;
+      return result;
+    }
+    result.reply = 'I did not recognize that request. Try “help”, “list projects”, “open https://example.com”, or “run PROFILE in PROJECT”.';
     return result;
   }
 
-  if (result.provider.configured) {
-    const projectSummary = projects.length ? projects.map((project) => `${project.name}: ${Object.keys(project.commands || {}).join(', ') || 'no profiles'}`).join('; ') : 'none';
-    // Short prompt on purpose: a small local model pays for every prompt token in prefill time.
-    const system = `You are BRO, a concise voice assistant for ${userName} on Windows. Projects: ${projectSummary}. Answer in one to three short spoken sentences; no lists, no markdown. You cannot run commands or touch the computer: the app does that. Never say you opened, closed, clicked, scrolled, typed, or changed anything. If asked for the time, date, battery, or a file on this PC, say you cannot read it rather than guessing.`;
-    const local = isLocalBaseUrl(settings && settings.baseUrl);
-    const turns = local ? 6 : 10;
-    const completion = await chatCompletion(settings, [{ role: 'system', content: system }, ...history.slice(-turns), { role: 'user', content: text }]);
-    if (completion.ok) {
-      result.reply = deniesUnperformedAction(completion.reply) ? UNPERFORMED_ACTION_REPLY : completion.reply;
-      return result;
-    }
-    result.reply = completion.reason === 'provider timed out'
-      ? 'The configured AI provider took too long to answer. The local model may still be starting; please try again.'
-      : completion.reason === 'model not installed'
-        ? `The local model “${settings.model}” is not installed yet. Run “ollama pull ${settings.model}” once, then ask me again.`
-        : 'My local model is not answering, so I can still run direct commands such as “open YouTube”, “open Notepad”, or “scroll down”. Start Ollama for open conversation.';
+  // Everything else is a conversation. Qwen answers, and may pick a registered
+  // tool when the request needs one; tool calls run through the same guardrail
+  // pipeline as deterministic actions and their real results go back to Qwen.
+  const answer = await brain.respond({
+    settings,
+    userName,
+    projects,
+    history: conversation,
+    message: text,
+    guardrailMode: normalizeMode(guardrails && guardrails.mode) || DEFAULT_MODE,
+    toAction: (name, args) => toolActionFor(name, args, { projects, lastTarget }),
+    runAction,
+    onStatus,
+  });
+  if (answer.ok) {
+    const ranTool = Array.isArray(answer.steps) && answer.steps.some((step) => step.status === 'ok' && step.action);
+    result.reply = !ranTool && deniesUnperformedAction(answer.reply) ? UNPERFORMED_ACTION_REPLY : answer.reply;
+    if (Array.isArray(answer.steps) && answer.steps.length) result.toolSteps = answer.steps;
     return result;
   }
-  result.reply = 'I did not recognize that request. Try “help”, “list projects”, “open https://example.com”, or “run PROFILE in PROJECT”.';
+  result.reply = answer.reason === 'provider timed out'
+    ? 'The configured AI provider took too long to answer. The local model may still be starting; please try again.'
+    : answer.reason === 'model not installed'
+      ? `The local model “${settings.model}” is not installed yet. Run “ollama pull ${settings.model}” once, then ask me again.`
+      : 'My local model is not answering, so I can still run direct commands such as “open YouTube”, “open Notepad”, or “scroll down”. Start Ollama for open conversation.';
   return result;
 }
 
-module.exports = { handleChat, projectByName, DEFAULT_USER_NAME, displayNameFor, isGreeting, stripGreetingPrefix, resolveSiteUrl, canonicalContextTarget, contextAction, siteLabel };
+module.exports = { handleChat, toolActionFor, projectByName, DEFAULT_USER_NAME, displayNameFor, isGreeting, stripGreetingPrefix, resolveSiteUrl, canonicalContextTarget, contextAction, siteLabel };

@@ -7,7 +7,7 @@ const emptyContext = { projects: [], settings: {}, user: { displayName: 'Bharath
 test('greets Bharath without creating an action', async () => {
   const result = await handleChat({ ...emptyContext, message: 'Hey bro, I welcome it bro, hey bro' });
   assert.match(result.reply, /Hey Bharath/);
-  assert.match(result.reply, /local assistant/);
+  assert.match(result.reply, /desktop assistant/);
   assert.deepEqual(result.actions, []);
 });
 
@@ -19,12 +19,12 @@ test('recognizes common greetings deterministically', async () => {
   }
 });
 
-test('greetings bypass a configured provider', async () => {
+test('greetings are written by the configured provider, with a natural fallback', async () => {
   const originalFetch = global.fetch;
-  let called = false;
+  let called = 0;
   global.fetch = async () => {
-    called = true;
-    throw new Error('provider should not be called for a greeting');
+    called += 1;
+    throw new Error('simulated provider outage');
   };
   try {
     const result = await handleChat({
@@ -32,30 +32,43 @@ test('greetings bypass a configured provider', async () => {
       message: 'Hey BRO',
       settings: { baseUrl: 'https://provider.invalid/v1', model: 'test-model', apiKey: 'test-key' }
     });
+    // The greeting is a conversation, so the brain is asked first...
+    assert.equal(called, 1);
+    // ...and a failed request still leaves a warm, human greeting, not a dump.
     assert.match(result.reply, /Bharath/);
-    assert.equal(called, false);
+    assert.doesNotMatch(result.reply, /command reference|system controls/i);
+    assert.deepEqual(result.actions, []);
   } finally {
     global.fetch = originalFetch;
   }
 });
 
-test('an unmapped PC action answers instantly instead of waiting on the model', async () => {
+test('an unmapped PC action answers instantly when no provider is configured', async () => {
+  const started = Date.now();
+  const result = await handleChat({ ...emptyContext, message: 'scroll to the left a bit' });
+  assert.match(result.reply, /don’t know how to do that yet/);
+  assert.deepEqual(result.actions, []);
+  assert.ok(Date.now() - started < 1000, 'the offline reply must not wait for a model');
+});
+
+test('an unmapped PC action is offered to the AI brain when a provider is configured', async () => {
   const originalFetch = global.fetch;
-  let called = false;
+  let called = 0;
   global.fetch = async () => {
-    called = true;
-    throw new Error('the model cannot perform PC actions');
+    called += 1;
+    return {
+      ok: true,
+      async json() { return { choices: [{ message: { content: 'I can nudge the page sideways for you.' } }] }; }
+    };
   };
   try {
-    const started = Date.now();
     const result = await handleChat({
       ...emptyContext,
       message: 'scroll to the left a bit',
-      settings: { baseUrl: 'http://127.0.0.1:9/v1', model: 'qwen2.5:3b', apiKey: 'ollama' }
+      settings: { baseUrl: 'https://provider.invalid/v1', model: 'qwen2.5:3b', apiKey: 'test-key' }
     });
-    assert.equal(called, false);
-    assert.match(result.reply, /don’t know how to do that yet/);
-    assert.ok(Date.now() - started < 1000, 'the reply must not wait for a model');
+    assert.equal(called, 1);
+    assert.match(result.reply, /nudge the page sideways/);
   } finally {
     global.fetch = originalFetch;
   }

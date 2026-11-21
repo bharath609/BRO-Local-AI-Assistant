@@ -79,23 +79,35 @@ function chatText(payload) {
   return typeof content === 'string' ? content.trim() : '';
 }
 
-async function requestChat(settings, info, messages) {
+async function requestChat(settings, info, messages, options = {}) {
   const controller = new AbortController();
   const configured = Number(process.env.BRO_AI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
-  const timeoutMs = isLocalBaseUrl(info.baseUrl) ? LOCAL_TIMEOUT_MS : configured;
+  const requested = Number(options.timeoutMs);
+  const timeoutMs = Number.isFinite(requested) && requested > 0
+    ? requested
+    : (isLocalBaseUrl(info.baseUrl) ? LOCAL_TIMEOUT_MS : configured);
   const timer = setTimeout(() => controller.abort(), Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS);
   try {
     const headers = { 'content-type': 'application/json' };
     if (settings.apiKey) headers.authorization = `Bearer ${settings.apiKey}`;
     const useResponses = info.protocol === 'responses' || (info.protocol === 'auto' && isOpenAIBaseUrl(info.baseUrl));
     const endpoint = useResponses ? `${info.baseUrl}/responses` : `${info.baseUrl}/chat/completions`;
+    // The Responses protocol is only used for OpenAI, where the chat tool format
+    // differs. Tool calling there falls back to the structured JSON protocol.
+    const wantsTools = Array.isArray(options.tools) && options.tools.length > 0 && !useResponses;
     // A small local model speaks a lot slower per token, so cap the answer length there.
     // 120 tokens is already three or four spoken sentences, and it keeps a
     // worst-case answer around 16 s instead of letting the request time out.
-    const maxTokens = isLocalBaseUrl(info.baseUrl) ? 120 : 512;
+    const maxTokens = isLocalBaseUrl(info.baseUrl) ? 240 : 700;
     const body = useResponses
       ? { model: info.model, input: messages, max_output_tokens: maxTokens }
-      : { model: info.model, messages, temperature: 0.2, max_tokens: maxTokens };
+      : {
+          model: info.model,
+          messages,
+          temperature: Number.isFinite(options.temperature) ? options.temperature : 0.3,
+          max_tokens: maxTokens,
+          ...(wantsTools ? { tools: options.tools, tool_choice: options.toolChoice || 'auto' } : {}),
+        };
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
@@ -103,13 +115,20 @@ async function requestChat(settings, info, messages) {
       signal: controller.signal
     });
     if (!response.ok) {
+      // A 400/422 with tools usually means the endpoint does not implement the
+      // OpenAI tool-calling shape. Tells the brain to switch to its JSON fallback.
+      if (wantsTools && (response.status === 400 || response.status === 422)) {
+        return { ok: false, toolsUnsupported: true, reason: 'provider rejected tool calling' };
+      }
       // Ollama answers 404 when the configured model was never pulled; say so instead of "offline".
       return { ok: false, reason: response.status === 404 ? 'model not installed' : 'provider request failed' };
     }
     const payload = await response.json();
-    const content = useResponses ? responseText(payload) : chatText(payload);
-    if (!content) return { ok: false, reason: 'provider returned no reply' };
-    return { ok: true, reply: content };
+    const message = payload?.choices?.[0]?.message;
+    const content = useResponses ? responseText(payload) : (typeof message?.content === 'string' ? message.content.trim() : '');
+    const toolCalls = !useResponses && Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+    if (!content && toolCalls.length === 0) return { ok: false, reason: 'provider returned no reply' };
+    return { ok: true, reply: content, toolCalls, message, protocol: useResponses ? 'responses' : 'chat' };
   } catch (error) {
     const aborted = error && error.name === 'AbortError';
     return { ok: false, reason: aborted ? 'provider timed out' : 'provider request failed', network: !aborted };
@@ -118,9 +137,12 @@ async function requestChat(settings, info, messages) {
   }
 }
 
-async function requestOllama(settings, info, messages) {
+async function requestOllama(settings, info, messages, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LOCAL_TIMEOUT_MS);
+  const requested = Number(options.timeoutMs);
+  const timeoutMs = Number.isFinite(requested) && requested > 0 ? requested : LOCAL_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const wantsTools = Array.isArray(options.tools) && options.tools.length > 0;
   try {
     const base = info.baseUrl.replace(/\/v1\/?$/, '');
     const response = await fetch(`${base}/api/chat`, {
@@ -130,13 +152,14 @@ async function requestOllama(settings, info, messages) {
         model: info.model,
         messages,
         stream: false,
+        ...(wantsTools ? { tools: options.tools } : {}),
         // Keep the model resident between questions so the second one does not
         // pay for a 2 GB load again, but cap the context and threads so voice
         // capture keeps its share of the CPU.
         keep_alive: OLLAMA_KEEP_ALIVE,
         options: {
-          temperature: 0.2,
-          num_predict: 120,
+          temperature: Number.isFinite(options.temperature) ? options.temperature : 0.3,
+          num_predict: wantsTools ? 240 : 120,
           num_ctx: OLLAMA_NUM_CTX,
           num_thread: LOCAL_THREADS,
         },
@@ -144,12 +167,21 @@ async function requestOllama(settings, info, messages) {
       signal: controller.signal,
     });
     if (!response.ok) {
+      if (wantsTools && (response.status === 400 || response.status === 422)) {
+        return { ok: false, toolsUnsupported: true, reason: 'provider rejected tool calling' };
+      }
       return { ok: false, reason: response.status === 404 ? 'model not installed' : 'provider request failed' };
     }
     const payload = await response.json();
-    const content = payload?.message?.content;
-    if (typeof content !== 'string' || !content.trim()) return { ok: false, reason: 'provider returned no reply' };
-    return { ok: true, reply: content.trim() };
+    const message = payload?.message || {};
+    const content = typeof message.content === 'string' ? message.content.trim() : '';
+    const toolCalls = (Array.isArray(message.tool_calls) ? message.tool_calls : []).map((call, index) => ({
+      id: call.id || `ollama-${index}`,
+      type: 'function',
+      function: { name: call.function?.name, arguments: call.function?.arguments ?? '{}' },
+    })).filter((call) => call.function.name);
+    if (!content && toolCalls.length === 0) return { ok: false, reason: 'provider returned no reply' };
+    return { ok: true, reply: content, toolCalls, message: { role: 'assistant', content, tool_calls: toolCalls }, protocol: 'ollama' };
   } catch (error) {
     const aborted = error && error.name === 'AbortError';
     return { ok: false, reason: aborted ? 'provider timed out' : 'provider request failed', network: !aborted };
@@ -222,15 +254,20 @@ async function startLocalRuntime(baseUrl) {
   return promise;
 }
 
-async function chatCompletion(settings, messages) {
+async function chatComplete(settings, messages, options = {}) {
   const info = providerInfo(settings);
   if (!info.configured) return { ok: false, reason: 'unconfigured' };
   const native = isOllamaBaseUrl(info.baseUrl);
-  const send = () => (native ? requestOllama(settings, info, messages) : requestChat(settings, info, messages));
+  const send = () => (native ? requestOllama(settings, info, messages, options) : requestChat(settings, info, messages, options));
   let result = await send();
   if (!result.ok && result.network && info.local) {
     if (await startLocalRuntime(info.baseUrl)) result = await send();
   }
+  return result;
+}
+
+async function chatCompletion(settings, messages, options = {}) {
+  const result = await chatComplete(settings, messages, options);
   return result.ok ? { ok: true, reply: result.reply } : { ok: false, reason: result.reason };
 }
 
@@ -255,6 +292,7 @@ module.exports = {
   isOllamaBaseUrl,
   providerInfo,
   responseText,
+  chatComplete,
   chatCompletion,
   warmLocalRuntime
 };

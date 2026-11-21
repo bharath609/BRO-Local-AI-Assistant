@@ -35,7 +35,7 @@ test('OpenAI GPT-6.1 Sol uses the Responses API when configured explicitly', asy
     const body = JSON.parse(request.options.body);
     assert.equal(body.model, GPT_6_1_SOL_MODEL);
     assert.deepEqual(body.input, [{ role: 'user', content: 'hello' }]);
-    assert.equal(body.max_output_tokens, 512);
+    assert.equal(body.max_output_tokens, 700);
   } finally {
     global.fetch = originalFetch;
   }
@@ -80,7 +80,7 @@ test('chatCompletion sends a bounded request to a non-Ollama local provider', as
     assert.equal(request.options.headers.authorization, undefined);
     const body = JSON.parse(request.options.body);
     assert.equal(body.model, 'llama3.2:3b');
-    assert.equal(body.max_tokens, 120);
+    assert.equal(body.max_tokens, 240);
   } finally {
     global.fetch = originalFetch;
   }

@@ -189,6 +189,23 @@ You can also double-click `start-bro-overlay.cmd`. BRO registers the desktop ove
 
 BRO greets the configured local user as Bharath by default. To change the display name for a local installation, set `BRO_USER_NAME` before starting the server. Casual greetings create a reply only; they never open a site, project, or command. Local instruction-router and application-control skills are stored at `.opencode/skills/bro-instruction-router/SKILL.md` and `.opencode/skills/bro-application-control/SKILL.md`.
 
+## Conversation and the AI brain
+
+The configured model (Qwen by default) is the voice of the assistant, not a command manual. Greetings such as “Hello BRO”, questions such as “What can you do?”, and anything the deterministic parser cannot map are answered by the model in normal language. The full command list is opt-in: say **“command reference”** or **“list all commands”** when you actually want it.
+
+Routing is hybrid on purpose:
+
+1. **Deterministic parser first** in `src/assistant.js`. Fast, offline, exact commands (`open Chrome`, `scroll down`, `what time is it`) keep working in milliseconds and never need the model.
+2. **AI brain second** in `src/brain.js`. Conversation, ambiguous requests, and PC actions the parser does not recognize go to the model.
+3. **Tools, not shell access.** The model may call one of 20 validated tools (open/close apps and sites, search, windows, media, typing, screenshots, folders, settings, projects). Every argument is checked in `src/tool-schema.js` before it becomes an action.
+4. **Guardrails stay in charge.** Tool actions run through the same `runWithGuardrails()` pipeline as every other action. Destructive work (shutdown, restart, delete, Recycle Bin, guardrail changes) is deliberately not offered as a tool, so the existing spoken-confirmation path is never bypassed.
+
+Providers with OpenAI-style tool calling use it directly (chat-completions and Ollama). Providers without it, including the Responses API, fall back to a strict JSON tool protocol (`{"tool":"...","arguments":{...}}`). The loop is bounded to 4 model steps and 6 tool calls, so a confused model cannot spin forever.
+
+Chat is streamed over newline-delimited JSON at `POST /api/chat/stream`, which lets the UI show live status (“Opening Chrome…”) while a tool runs and guarantees a `done` event. The non-streaming `POST /api/chat` endpoint remains for compatibility.
+
+See `docs/AI_BRAIN.md` for the architecture, safety model, and verification results.
+
 ## Reply-first, async command execution
 
 Commands return a reply **immediately**, before any window/focus/scroll work runs. This means every spoken request gets a response within ~50–200 ms, and the actual action (opening apps, scrolling, maximizing windows, playing media keys) happens in the background so it never blocks the next command.

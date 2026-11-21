@@ -391,6 +391,81 @@ async function bringOpenedThingForward(action, outcome) {
   }
 }
 
+function describeToolOutcome(outcome) {
+  const result = outcome && outcome.result;
+  if (result == null) return 'Done.';
+  if (typeof result === 'string') return result.slice(0, 300);
+  if (typeof result === 'object') {
+    const pieces = [];
+    for (const key of ['label', 'name', 'kind', 'target', 'opened', 'sent', 'path', 'output']) {
+      const value = result[key];
+      if (value === undefined || value === null || value === '') continue;
+      pieces.push(`${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`);
+    }
+    if (pieces.length) return pieces.join(', ').slice(0, 300);
+  }
+  return JSON.stringify(result).slice(0, 300);
+}
+
+// Runs one AI-selected tool through the same guardrail pipeline as every other
+// action and returns a compact result the model can describe in its own words.
+async function runChatTool(action) {
+  const gate = await runWithGuardrails(action, { source: 'chat' });
+  if (gate && gate.executed) {
+    // Same follow-up as deterministic actions: bring the launched window forward
+    // and enlarge it. Runs after the result is described so the model is not kept
+    // waiting on PowerShell focus loops.
+    void bringOpenedThingForward(action, gate.outcome).catch(() => {});
+    return { status: 'ok', action: action.type, message: describeToolOutcome(gate.outcome) };
+  }
+  if (gate && gate.approval) {
+    return { status: 'needs_approval', action: action.type, message: 'Waiting for the user to approve this action.' };
+  }
+  if (gate && gate.blocked) {
+    return { status: 'blocked', action: action.type, message: gate.message || 'That action is blocked right now.' };
+  }
+  return { status: 'failed', action: action.type, message: 'The action did not run.' };
+}
+
+function splitActions(result) {
+  const safeActions = [];
+  const immediate = [];
+  for (const action of result.actions) {
+    if (IMMEDIATE_ACTIONS.has(action.type)) immediate.push(action);
+    else safeActions.push(action);
+  }
+  result.actions = safeActions;
+  return immediate;
+}
+
+function runImmediate(immediate) {
+  void (async () => {
+    for (const action of immediate) {
+      try {
+        const gate = await runWithGuardrails(action, { source: 'chat' });
+        if (gate.executed && gate.outcome) bringOpenedThingForward(action, gate.outcome).catch(() => {});
+      } catch { /* the audit log already records the failure */ }
+    }
+  })();
+}
+
+function chatArgs(body, extra = {}) {
+  return {
+    message: String(body.message || ''),
+    history: Array.isArray(body.history) ? body.history : [],
+    projects: store.listProjects(),
+    settings: store.loadSettings(),
+    user: userProfile,
+    context: body.context || body.requestContext || {},
+    lastTarget: body.lastTarget,
+    guardrails: store.loadGuardrails(),
+    audit: audit.read(6),
+    pendingApprovals: 0,
+    runAction: runChatTool,
+    ...extra,
+  };
+}
+
 async function route(request, response) {
   const parsed = new URL(request.url, `http://${HOST}`);
   const pathname = parsed.pathname;
@@ -479,46 +554,52 @@ async function route(request, response) {
   }
   if (request.method === 'POST' && pathname === '/api/chat') {
     const body = await readBody(request);
-    const message = String(body.message || '');
-    const incomingContext = body.context || body.requestContext || {};
-    const state = store.loadGuardrails();
-
     // In normal mode, execute actions directly without requiring yes/no approval.
     // The model suggests, the server checks guardrails, and the action runs.
-    const result = await handleChat({
-      message,
-      history: Array.isArray(body.history) ? body.history : [],
-      projects: store.listProjects(),
-      settings: store.loadSettings(),
-      user: userProfile,
-      context: incomingContext,
-      lastTarget: body.lastTarget,
-      guardrails: state,
-      audit: audit.read(6),
-      pendingApprovals: 0,
-    });
-    const safeActions = [];
-    const immediate = [];
-    for (const action of result.actions) {
-      if (IMMEDIATE_ACTIONS.has(action.type)) immediate.push(action);
-      else safeActions.push(action);
-    }
-    result.actions = safeActions;
+    const result = await handleChat(chatArgs(body));
+    const immediate = splitActions(result);
     // No approvals queue in normal mode.
     result.guardrails = publicGuardrails();
     const payload = json(response, 200, result);
     // Launching a window or scrolling takes PowerShell a second or two. The reply
     // is already on the wire, so do that work afterwards instead of making the
     // user wait for it.
-    void (async () => {
-      for (const action of immediate) {
-        try {
-          const gate = await runWithGuardrails(action, { source: 'chat' });
-          if (gate.executed && gate.outcome) bringOpenedThingForward(action, gate.outcome).catch(() => {});
-        } catch { /* the audit log already records the failure */ }
-      }
-    })();
+    runImmediate(immediate);
     return payload;
+  }
+  // Same turn, streamed as newline-delimited JSON so the UI can show what BRO is
+  // doing while a tool runs, and can always close the request on `done`.
+  if (request.method === 'POST' && pathname === '/api/chat/stream') {
+    const body = await readBody(request);
+    response.writeHead(200, {
+      ...SECURITY_HEADERS,
+      'content-type': 'application/x-ndjson; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-accel-buffering': 'no',
+    });
+    if (typeof response.flushHeaders === 'function') response.flushHeaders();
+    let closed = false;
+    response.on('close', () => { closed = true; });
+    const send = (event) => {
+      if (closed) return;
+      try { response.write(`${JSON.stringify(event)}\n`); } catch { closed = true; }
+    };
+    send({ type: 'status', message: 'Thinking…' });
+    try {
+      const result = await handleChat(chatArgs(body, { onStatus: (label) => send({ type: 'status', message: label }) }));
+      const immediate = splitActions(result);
+      result.guardrails = publicGuardrails();
+      send({ type: 'result', payload: result });
+      send({ type: 'done' });
+      if (!closed) response.end();
+      runImmediate(immediate);
+    } catch (error) {
+      const status = error.statusCode || 500;
+      if (status >= 500) logger.error(`chat stream failed: ${(error && (error.stack || error.message)) || String(error)}`);
+      send({ type: 'error', error: status >= 500 ? 'Internal server error.' : error.message });
+      if (!closed) response.end();
+    }
+    return;
   }
   if (request.method === 'POST' && pathname === '/api/action') {
     const body = await readBody(request);
