@@ -1,8 +1,9 @@
 const { validateHttpUrl, normalizeDesktopTarget, resolveWindowsTarget, findInstalledApp, findUserFile, USER_FILE_FOLDERS, findYouTubeVideo } = require('./tools');
 const { providerInfo } = require('./provider');
 const { matchApplicationSkill } = require('./skills/application-control');
-const { DEFAULT_MODE, normalizeMode } = require('./guardrails');
+const { DEFAULT_MODE, normalizeMode, isYes, isNo } = require('./guardrails');
 const brain = require('./brain');
+const { looksLikeAgentTask } = require('./agent');
 const { normalizeHistory } = require('./history');
 const COMMAND_CATALOG = require('./command-catalog.json');
 const APP_CATALOG = require('./app-catalog.json');
@@ -520,7 +521,7 @@ function contextAction(target, projects) {
 
 function baseResult(settings, context, extra = {}) {
   const preserved = {};
-  for (const key of ['mediaState', 'pending', 'lastFileQuery']) {
+  for (const key of ['mediaState', 'pending', 'lastFileQuery', 'agentPending']) {
     if (extra && extra[key]) preserved[key] = extra[key];
   }
   return { actions: [], provider: providerInfo(settings), context: { ...preserved, lastTarget: context } };
@@ -715,10 +716,39 @@ function toolActionFor(name, args = {}, { projects = [], lastTarget = null } = {
   }
 }
 
-async function handleChat({ message, history = [], projects = [], settings, user, context, requestContext, lastTarget: directLastTarget, guardrails, audit = [], pendingApprovals = 0, runAction, onStatus }) {
+async function handleChat({ message, history = [], projects = [], settings, user, context, requestContext, lastTarget: directLastTarget, guardrails, audit = [], pendingApprovals = 0, runAction, onStatus, agentRuntime = null, agentContext = {} }) {
   const incomingContext = context || requestContext || (directLastTarget ? { lastTarget: directLastTarget } : {});
   const lastTarget = canonicalContextTarget(incomingContext.lastTarget, projects);
   const result = baseResult(settings, lastTarget, incomingContext);
+  const applyAgentOutcome = (outcome) => {
+    result.reply = String(outcome && outcome.reply || '').trim()
+      || (outcome && outcome.ok === false ? 'I could not finish that task.' : 'Done.');
+    if (outcome && outcome.task) {
+      result.agentTask = {
+        id: outcome.task.id,
+        goal: String(outcome.task.goal || '').slice(0, 200),
+        status: outcome.task.status,
+        steps: (outcome.task.steps || []).slice(-12).map((step) => ({
+          id: step.id,
+          tool: step.tool,
+          summary: String(step.summary || '').slice(0, 200),
+          status: step.status,
+          message: String(step.message || '').slice(0, 240),
+        })),
+      };
+    }
+    if (outcome && outcome.status === 'awaiting_confirmation' && outcome.pending) {
+      const args = outcome.pending.args || {};
+      const target = args.path || args.url || args.query || args.text || args.to || args.window || '';
+      result.context.agentPending = {
+        name: outcome.pending.name,
+        reason: outcome.pending.reason,
+        target: String(target).slice(0, 160),
+      };
+    } else {
+      delete result.context.agentPending;
+    }
+  };
   if (typeof message !== 'string' || !message.trim()) {
     result.reply = 'Tell me what you would like to do. Try “list projects” or “open https://example.com”.';
     return result;
@@ -745,6 +775,25 @@ async function handleChat({ message, history = [], projects = [], settings, user
     return result;
   }
   let commandText = stripCommandPoliteness(stripGreetingPrefix(text));
+
+  // A BRO 2.0 task may be paused on one risky step. Only a clear yes/no applies
+  // to that exact pending call; any other sentence cancels it and is handled as
+  // a fresh request, so an old confirmation can never leak into a new action.
+  if (agentRuntime && agentRuntime.pending) {
+    if (isYes(commandText)) {
+      if (typeof onStatus === 'function') onStatus('Running the confirmed step…');
+      const outcome = await agentRuntime.resume({ approve: true, onStatus });
+      applyAgentOutcome(outcome);
+      return result;
+    }
+    if (isNo(commandText)) {
+      const outcome = await agentRuntime.resume({ approve: false });
+      applyAgentOutcome(outcome);
+      return result;
+    }
+    agentRuntime.cancel('Superseded by a new request.');
+    delete result.context.agentPending;
+  }
 
   if (/^(?:activate|start|wake(?:\s+up)?)\s+bro(?:\s+command)?$/i.test(commandText)) {
     result.actions.push({ id: 'activate_bro', type: 'activate_bro', args: {}, label: 'Activate BRO voice popup' });
@@ -851,6 +900,27 @@ async function handleChat({ message, history = [], projects = [], settings, user
   }
   if (/^(list|show)(?:\s+me)?\s+(?:my\s+)?projects\??$/i.test(commandText) || lower === 'projects') {
     result.reply = projects.length ? projects.map((project) => `${project.name} (${project.root})`).join('\n') : 'No projects are registered yet.';
+    return result;
+  }
+
+  // BRO 2.0 computer use: multi-step or app-automation requests go to the agent
+  // runtime. The narrow intent check above this branch keeps ordinary commands
+  // (“open Notepad”, “scroll down”, “play X on YouTube”) on the fast path.
+  if (agentRuntime && result.provider.configured && looksLikeAgentTask(commandText)) {
+    if (typeof onStatus === 'function') onStatus('Planning the task…');
+    const outcome = await agentRuntime.run({
+      goal: commandText,
+      history: conversation,
+      projects,
+      userName,
+      settings,
+      guardrails: guardrails || { mode: DEFAULT_MODE, locked: false },
+      dataDir: agentContext && agentContext.dataDir ? agentContext.dataDir : '',
+      extraRoots: Array.isArray(agentContext && agentContext.extraRoots) ? agentContext.extraRoots : [],
+      cdpPort: agentContext && agentContext.cdpPort ? agentContext.cdpPort : undefined,
+      onStatus,
+    });
+    applyAgentOutcome(outcome);
     return result;
   }
 

@@ -32,3 +32,5 @@
 .audit-row.blocked_locked .audit-decision,.audit-row.denied .audit-decision,.audit-row.failed .audit-decision{color:var(--red)}
 .audit-label{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nav-count.attention{background:var(--amber);color:#201704}
+
+.stop-button{border:1px solid rgba(255,134,124,.55);background:rgba(83,34,32,.35);color:#ffd4cf;border-radius:8px;padding:8px 12px;font-weight:700;font-size:12px}.stop-button:hover{background:rgba(120,44,40,.5)}.stop-button:disabled{opacity:.6;cursor:not-allowed}.stop-button[hidden]{display:none}

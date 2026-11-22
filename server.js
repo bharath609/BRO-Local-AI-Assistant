@@ -6,6 +6,7 @@ const { createStore, ValidationError } = require('./src/store');
 const tools = require('./src/tools');
 const { providerInfo, warmLocalRuntime } = require('./src/provider');
 const { handleChat, DEFAULT_USER_NAME } = require('./src/assistant');
+const { agent } = require('./src/agent');
 const voice = require('./src/voice');
 const guardrails = require('./src/guardrails');
 const { resolvePaths } = require('./src/paths');
@@ -462,8 +463,22 @@ function chatArgs(body, extra = {}) {
     audit: audit.read(6),
     pendingApprovals: 0,
     runAction: runChatTool,
+    agentRuntime: agent,
+    agentContext: { dataDir: store.dataDir },
     ...extra,
   };
+}
+
+function recordAgentTask(result) {
+  const task = result && result.agentTask;
+  if (!task) return;
+  audit.append({
+    type: 'agent_task',
+    label: String(task.goal || task.id || 'Computer task').slice(0, 160),
+    risk: 'agent',
+    decision: task.status || 'unknown',
+    source: 'agent',
+  });
 }
 
 async function route(request, response) {
@@ -473,7 +488,7 @@ async function route(request, response) {
   if (rejection) return json(response, rejection.status, { error: rejection.error });
   if (request.method === 'GET' && pathname === '/api/bootstrap') {
     const settings = store.loadSettings();
-    return json(response, 200, { appName: 'BRO Local AI Assistant', user: userProfile, provider: providerInfo(settings), projects: store.listProjects(), capabilities, voice: voice.status(), guardrails: publicGuardrails(), approvals: approvals.list() });
+    return json(response, 200, { appName: 'BRO Local AI Assistant', user: userProfile, provider: providerInfo(settings), projects: store.listProjects(), capabilities, voice: voice.status(), guardrails: publicGuardrails(), approvals: approvals.list(), agent: agent.status() });
   }
   if (request.method === 'GET' && pathname === '/api/guardrails') {
     return json(response, 200, { guardrails: publicGuardrails(), approvals: approvals.list() });
@@ -514,6 +529,20 @@ async function route(request, response) {
   if (request.method === 'GET' && pathname === '/api/audit') {
     const limit = Number(parsed.searchParams.get('limit') || 50);
     return json(response, 200, { entries: audit.read(limit) });
+  }
+  if (request.method === 'GET' && pathname === '/api/agent/status') {
+    return json(response, 200, { agent: agent.status() });
+  }
+  if (request.method === 'POST' && (pathname === '/api/task/cancel' || pathname === '/api/agent/cancel')) {
+    const outcome = agent.cancel('Cancelled from the interface.');
+    if (outcome.cancelled) {
+      audit.append({ type: 'task_cancel', label: 'Computer task cancelled', risk: 'agent', decision: 'cancelled', source: 'app' });
+    }
+    return json(response, 200, {
+      cancelled: Boolean(outcome.cancelled),
+      reply: outcome.cancelled ? 'Stopped. Nothing further will run.' : 'There was no task running.',
+      agent: agent.status(),
+    });
   }
   if (request.method === 'GET' && pathname === '/api/voice/status') {
     return json(response, 200, voice.status());
@@ -560,6 +589,7 @@ async function route(request, response) {
     const immediate = splitActions(result);
     // No approvals queue in normal mode.
     result.guardrails = publicGuardrails();
+    recordAgentTask(result);
     const payload = json(response, 200, result);
     // Launching a window or scrolling takes PowerShell a second or two. The reply
     // is already on the wire, so do that work afterwards instead of making the
@@ -579,7 +609,15 @@ async function route(request, response) {
     });
     if (typeof response.flushHeaders === 'function') response.flushHeaders();
     let closed = false;
-    response.on('close', () => { closed = true; });
+    let finished = false;
+    response.on('close', () => {
+      closed = true;
+      // Closing the chat window stops a running computer-use task instead of
+      // letting it keep clicking in the background.
+      if (!finished) {
+        try { agent.cancel('The chat window closed before the task finished.'); } catch { /* ignore */ }
+      }
+    });
     const send = (event) => {
       if (closed) return;
       try { response.write(`${JSON.stringify(event)}\n`); } catch { closed = true; }
@@ -589,11 +627,14 @@ async function route(request, response) {
       const result = await handleChat(chatArgs(body, { onStatus: (label) => send({ type: 'status', message: label }) }));
       const immediate = splitActions(result);
       result.guardrails = publicGuardrails();
+      recordAgentTask(result);
+      finished = true;
       send({ type: 'result', payload: result });
       send({ type: 'done' });
       if (!closed) response.end();
       runImmediate(immediate);
     } catch (error) {
+      finished = true;
       const status = error.statusCode || 500;
       if (status >= 500) logger.error(`chat stream failed: ${(error && (error.stack || error.message)) || String(error)}`);
       send({ type: 'error', error: status >= 500 ? 'Internal server error.' : error.message });

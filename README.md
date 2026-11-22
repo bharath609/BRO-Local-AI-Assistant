@@ -327,7 +327,7 @@ Execute if allowed / Ask for yes if needed → Outcome returned to user
 
 ---
 
-*Guardrails simplified – 107/107 tests pass, trusted mode default, commands execute directly without yes/no prompts.*
+*Guardrails simplified – 162/162 tests pass (149 foundation + 13 new agent tests), trusted mode default, commands execute directly without yes/no prompts. BRO 2.0 agent layer adds computer-use capabilities with confirmation gates, master lock, and multi-step planning.*
 
 Without a provider, BRO still handles the local command and workspace intents. To enable general AI replies, use **Provider** in the UI and configure an OpenAI-compatible endpoint. For a local Ollama model, use `http://127.0.0.1:11434/v1` and an installed model such as `qwen2.5:3b`; local endpoints do not require an API key. If Ollama is installed but not running, BRO starts it automatically and retries the request once. For OpenAI, use `https://api.openai.com/v1`, choose the Responses API (or Auto), and enter the exact model available to your account. Settings are stored locally under `data/settings.json`, which is ignored by git. You can also set `BRO_AI_BASE_URL`, `BRO_AI_MODEL`, `BRO_AI_PROTOCOL`, and `BRO_AI_API_KEY` in the process environment before starting BRO. Never put the key in a chat message.
 

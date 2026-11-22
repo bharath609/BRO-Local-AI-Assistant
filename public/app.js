@@ -5,10 +5,10 @@
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const CHAT_STORAGE_KEY = 'bro-chat-history-v1';
   const CONTEXT_STORAGE_KEY = 'bro-last-target-v1';
-  const state = { view: 'chat', messages: [], projects: [], settings: {}, user: { displayName: 'Bharath' }, context: {}, online: false, readAloud: false, busy: false, turn: 0, chatAbort: null, recognition: null, voice: null, guardrails: { mode: 'guarded', locked: false, pending: 0 }, approvals: [] };
+  const state = { view: 'chat', messages: [], projects: [], settings: {}, user: { displayName: 'Bharath' }, context: {}, online: false, readAloud: false, busy: false, stopped: false, turn: 0, chatAbort: null, recognition: null, voice: null, guardrails: { mode: 'guarded', locked: false, pending: 0 }, approvals: [] };
 
   const els = {
-    views: $$('.view'), nav: $$('.nav-item'), title: $('#view-title'), eyebrow: $('#view-eyebrow'), welcome: $('#welcome-state'), welcomeHeading: $('#welcome-heading'), messages: $('#messages'), actionFeed: $('#action-feed'), typing: $('#typing-indicator'), input: $('#message-input'), chatForm: $('#chat-form'), send: $('#send-button'), mic: $('#mic-button'), speaker: $('#speaker-toggle'), connectionDot: $('#connection-dot'), connectionLabel: $('#connection-label'), connectionDetail: $('#connection-detail'), serverAlert: $('#server-alert'), serverAlertText: $('#server-alert-text'), toast: $('#toast'), projects: $('#project-list'), projectCount: $('#project-count'), projectForm: $('#project-form'), projectFormPanel: $('#project-form-panel'), projectMessage: $('#project-form-message'), settingsForm: $('#settings-form'), settingsMessage: $('#settings-message'), guardModes: $('#guard-modes'), guardBadge: $('#guard-mode-badge'), guardLock: $('#guard-lock'), guardCount: $('#guard-count'), approvalList: $('#approval-list'), auditList: $('#audit-list')
+    views: $$('.view'), nav: $$('.nav-item'), title: $('#view-title'), eyebrow: $('#view-eyebrow'), welcome: $('#welcome-state'), welcomeHeading: $('#welcome-heading'), messages: $('#messages'), actionFeed: $('#action-feed'), typing: $('#typing-indicator'), input: $('#message-input'), chatForm: $('#chat-form'), send: $('#send-button'), stop: $('#stop-button'), mic: $('#mic-button'), speaker: $('#speaker-toggle'), connectionDot: $('#connection-dot'), connectionLabel: $('#connection-label'), connectionDetail: $('#connection-detail'), serverAlert: $('#server-alert'), serverAlertText: $('#server-alert-text'), toast: $('#toast'), projects: $('#project-list'), projectCount: $('#project-count'), projectForm: $('#project-form'), projectFormPanel: $('#project-form-panel'), projectMessage: $('#project-form-message'), settingsForm: $('#settings-form'), settingsMessage: $('#settings-message'), guardModes: $('#guard-modes'), guardBadge: $('#guard-mode-badge'), guardLock: $('#guard-lock'), guardCount: $('#guard-count'), approvalList: $('#approval-list'), auditList: $('#audit-list')
   };
   const viewCopy = { chat: ['PERSONAL ASSISTANT', 'Good to see you, Bharath.'], workspace: ['YOUR WORKSPACE', 'Projects'], guardrails: ['YOUR CONTROL CENTER', 'Guardrails'], settings: ['LOCAL CONFIGURATION', 'Provider settings'] };
 
@@ -40,6 +40,11 @@
     state.busy = busy;
     els.send.disabled = busy;
     els.input.disabled = busy;
+    if (els.stop) {
+      els.stop.hidden = !busy;
+      els.stop.disabled = false;
+      els.stop.textContent = 'Stop';
+    }
     els.typing.hidden = !showThinking;
     els.typing.setAttribute('aria-hidden', showThinking ? 'false' : 'true');
     document.body.classList.toggle('is-busy', busy);
@@ -337,15 +342,46 @@
     buttons.append(deny, allow); card.append(buttons, result); els.actionFeed.append(card); scrollChat();
   }
 
+  function appendAgentSummary(task) {
+    if (!task || !Array.isArray(task.steps) || !task.steps.length) return;
+    const card = document.createElement('article'); card.className = 'action-card';
+    const head = document.createElement('div'); head.className = 'action-card-head';
+    const icon = document.createElement('div'); icon.className = 'action-card-icon'; icon.textContent = task.status === 'completed' ? '✓' : task.status === 'failed' ? '!' : '⋯'; icon.setAttribute('aria-hidden', 'true');
+    const body = document.createElement('div');
+    const title = document.createElement('h4'); title.textContent = `Task ${text(task.status, 'finished')} · ${task.steps.length} step${task.steps.length === 1 ? '' : 's'}`;
+    const list = document.createElement('p');
+    list.textContent = task.steps.slice(-8).map((step, index) => `${index + 1}. ${text(step.summary || step.tool, 'Step')} — ${text(step.status, 'done')}`).join('\n');
+    body.append(title, list); head.append(icon, body); card.append(head); els.actionFeed.append(card); scrollChat();
+  }
+
+  function appendAgentConfirmation(pending) {
+    if (!pending || !pending.name) return;
+    const card = document.createElement('article'); card.className = 'action-card approval';
+    const head = document.createElement('div'); head.className = 'action-card-head';
+    const icon = document.createElement('div'); icon.className = 'action-card-icon'; icon.textContent = '!'; icon.setAttribute('aria-hidden', 'true');
+    const body = document.createElement('div');
+    const title = document.createElement('h4'); title.textContent = 'Confirm this step';
+    const summary = document.createElement('p');
+    summary.textContent = `${text(pending.name).replace(/_/g, ' ')}${pending.target ? ` — ${pending.target}` : ''}. ${text(pending.reason, 'This step needs your confirmation.')}`;
+    body.append(title, summary); head.append(icon, body); card.append(head);
+    const buttons = document.createElement('div'); buttons.className = 'action-buttons';
+    const no = document.createElement('button'); no.type = 'button'; no.className = 'dismiss-button'; no.textContent = 'No';
+    const yes = document.createElement('button'); yes.type = 'button'; yes.className = 'approve-button'; yes.textContent = 'Yes, run it';
+    no.addEventListener('click', () => { no.disabled = true; yes.disabled = true; sendMessage('no'); });
+    yes.addEventListener('click', () => { no.disabled = true; yes.disabled = true; sendMessage('yes'); });
+    buttons.append(no, yes); card.append(buttons); els.actionFeed.append(card); scrollChat();
+  }
+
   async function sendMessage(value = els.input.value) {
     const message = text(value).trim(); if (!message || state.busy) return;
+    state.stopped = false;
     addMessage('user', message); els.input.value = ''; resizeInput();
     const turn = ++state.turn;
     const controller = new AbortController();
     state.chatAbort = controller;
     // A full tool round trip (model, tool, model) can take a while, but it must
     // never wait forever. The abort guarantees the interface returns to IDLE.
-    const timer = setTimeout(() => controller.abort(), 170_000);
+    const timer = setTimeout(() => controller.abort(), 260_000);
     setBusy(true, true); setStatus('Thinking…');
     try {
       const history = state.messages.slice(0, -1).slice(-20);
@@ -359,28 +395,46 @@
       } catch (streamError) {
         if (streamError.name === 'AbortError' || streamError.noRetry) throw streamError;
         // Older backend or a dropped stream: fall back to the plain endpoint.
-        data = await api('/api/chat', { method: 'POST', body: JSON.stringify(payload), signal: controller.signal }, { timeoutMs: 170_000 });
+        data = await api('/api/chat', { method: 'POST', body: JSON.stringify(payload), signal: controller.signal }, { timeoutMs: 260_000 });
       }
       if (turn !== state.turn) return;
       if (data.context && typeof data.context === 'object') { state.context = data.context; saveContext(); }
       applyGuardrails(data.guardrails, data.approvals);
       const reply = getChatReply(data); if (reply) addMessage('assistant', reply, new Date(), true);
       getActions(data).forEach(appendAction);
+      if (data.agentTask) appendAgentSummary(data.agentTask);
+      if (data.context && data.context.agentPending) appendAgentConfirmation(data.context.agentPending);
       (Array.isArray(data.approvals) ? data.approvals : []).forEach(appendApproval);
       if (!reply && !getActions(data).length && !(data.approvals || []).length) addMessage('assistant', 'I received that, but the backend did not return a message.');
       if ((data.approvals || []).length) loadAudit();
     }
     catch (error) {
       if (turn !== state.turn) return;
-      if (error && error.name === 'AbortError') addMessage('assistant', 'That took too long, so I stopped the request. Please try again.');
+      if (error && error.name === 'AbortError') {
+        addMessage('assistant', state.stopped
+          ? 'Stopped. Nothing further will run.'
+          : 'That took too long, so I stopped the request. Please try again.');
+      }
       else { addMessage('assistant', `I couldn’t finish that. ${errorMessage(error)}`); setConnection(false, 'Chat request failed'); }
     }
     finally {
       clearTimeout(timer);
       if (state.chatAbort === controller) state.chatAbort = null;
       if (turn === state.turn) { setBusy(false); els.input.focus(); scrollChat(); }
+      state.stopped = false;
     }
   }
+
+  // Stop cancels the server-side task first, then closes the stream. Aborting
+  // only the request would leave a browser or app task running in the background.
+  function stopCurrentTurn() {
+    if (!state.busy) return;
+    state.stopped = true;
+    if (els.stop) { els.stop.disabled = true; els.stop.textContent = 'Stopping…'; }
+    api('/api/task/cancel', { method: 'POST', body: '{}' }, { timeoutMs: 10_000 }).catch(() => {});
+    if (state.chatAbort) state.chatAbort.abort();
+  }
+  if (els.stop) els.stop.addEventListener('click', stopCurrentTurn);
   function resizeInput() { els.input.style.height = 'auto'; els.input.style.height = `${Math.min(els.input.scrollHeight, 140)}px`; }
   function renderProjects() {
     els.projects.textContent = ''; const count = state.projects.length; els.projectCount.textContent = `${count} project${count === 1 ? '' : 's'}`; $('#chat-count').textContent = state.messages.filter(message => message.role === 'user').length;
